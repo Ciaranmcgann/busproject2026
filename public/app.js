@@ -1,66 +1,52 @@
-// --- 1. Marker storage ---
-let markers = {}; // keyed by bus.id
+// public/app.js
 
+// Initialize map
+const map = L.map('map').setView([53.3498, -6.2603], 13);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19
+}).addTo(map);
+
+// Marker storage
+let markers = [];
+
+// Custom bus icon
 const busIcon = L.icon({
   iconUrl: 'icons/bus.png',
   iconSize: [40, 40],
   iconAnchor: [20, 20],
 });
 
-// --- 2. Add or update markers ---
-function addOrUpdateMarkers(buses, map) {
+// Add markers to map
+function addMarkers(buses) {
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+
   buses.forEach(bus => {
-    if (!bus.lat || !bus.lng) return;
+    if (!bus.route_id) return; // skip invalid
 
-    if (!markers[bus.id]) {
-      // create marker if it doesn't exist
-      markers[bus.id] = L.marker([bus.lat, bus.lng], { icon: busIcon })
-        .addTo(map)
-        .bindPopup(`Route: ${bus.route}`);
-    } else {
-      // update position
-      markers[bus.id].setLatLng([bus.lat, bus.lng])
-                     .bindPopup(`Route: ${bus.route}`);
-    }
+    const lat = 53.3498 + Math.random() * 0.01; // mock lat
+    const lng = -6.2603 + Math.random() * 0.01; // mock lng
+
+    const marker = L.marker([lat, lng], { icon: busIcon })
+      .addTo(map)
+      .bindPopup(`Route: ${bus.route_short_name || bus.route_id}`);
+
+    markers.push(marker);
   });
-
-  // save to localStorage for fast reload
-  localStorage.setItem('lastBuses', JSON.stringify(buses));
 }
 
-// --- 3. Fetch buses ---
+// Fetch buses from server
 async function fetchBuses() {
   try {
-    const res = await fetch("/api/buses");
+    const res = await fetch('/api/buses');
     const buses = await res.json();
-    if (buses.length) addOrUpdateMarkers(buses, map);
-    return buses;
+    addMarkers(buses);
   } catch (err) {
-    console.error("Error fetching buses:", err);
-    return [];
+    console.error('Error fetching buses:', err);
   }
 }
 
-// --- 4. Immediate fetch ---
-const initialBusesPromise = fetchBuses();
-
-// --- 5. Initialize map ---
-const map = L.map('map').setView([53.3498, -6.2603], 13);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19
-}).addTo(map);
-
-// --- 6. When map is ready ---
-map.whenReady(() => {
-  // load buses from localStorage instantly
-  const savedBuses = JSON.parse(localStorage.getItem('lastBuses') || '[]');
-  if (savedBuses.length) addOrUpdateMarkers(savedBuses, map);
-
-  // apply first API fetch
-  initialBusesPromise.then(buses => {
-    if (buses.length) addOrUpdateMarkers(buses, map);
-  });
-
-  // regular updates every 15 seconds
-  setInterval(fetchBuses, 8000);
-});
+// Initial fetch + interval
+fetchBuses();
+setInterval(fetchBuses, 15000);
