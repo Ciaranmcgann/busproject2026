@@ -3,14 +3,19 @@
 </script>
 
 <main>
-  <h1>Bus Tracker</h1>
   <Map />
 </main>
 
 <style>
+  :global(html, body) {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+  }
+
   main {
-    text-align: center;
-    margin: 2rem;
-    font-family: sans-serif;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
   }
 </style>

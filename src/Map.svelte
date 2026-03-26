@@ -28,15 +28,34 @@
 
   onMount(async () => {
     map = L.map("map").setView([53.35, -6.26], 12);
+
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(
       map
     );
 
+    // ✅ Custom bus icon
+    const busIcon = L.icon({
+      iconUrl: "/bus.png", // put this in /public/bus.png
+      iconSize: [32, 32],
+      iconAnchor: [16, 32],
+      popupAnchor: [0, -32],
+    });
+
     const buses = await fetchBuses();
+
     buses.forEach((bus) => {
-      L.marker([bus.lat, bus.lng]).addTo(map).bindPopup(`Route ${bus.route}`);
+      L.marker([bus.lat, bus.lng], { icon: busIcon })
+        .addTo(map)
+        .bindPopup(`Route ${bus.route}`);
     });
   });
 </script>
 
-<div id="map" style="height: 600px; width: 100%;"></div>
+<div id="map"></div>
+
+<style>
+  #map {
+    height: 100%;
+    width: 100%;
+  }
+</style>
