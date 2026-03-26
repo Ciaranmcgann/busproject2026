@@ -18,4 +18,9 @@
     height: 100vh;
     overflow: hidden;
   }
+
+  #map {
+    height: 100%;
+    width: 100%;
+  }
 </style>
