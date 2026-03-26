@@ -2,7 +2,7 @@
   "name": "busproject2026",
   "version": "1.0.0",
   "main": "server.js",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
     "axios": "^1.13.6",
     "csv-parse": "^6.2.1",
