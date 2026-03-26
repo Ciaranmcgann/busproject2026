@@ -1,1 +1,0 @@
-if (!Number.isFinite(bus.lat) || !Number.isFinite(bus.lng)) return;
