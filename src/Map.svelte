@@ -6,6 +6,9 @@
   let map;
   const markers = [];
 
+  // ✅ prevents overlapping API calls (helps avoid 429 errors)
+  let isFetching = false;
+
   async function fetchRouteNames() {
     try {
       const res = await fetch(
@@ -61,6 +64,9 @@
   }
 
   async function refreshBuses(routeNames, busIcon) {
+    if (isFetching) return;
+    isFetching = true;
+
     try {
       markers.forEach((m) => m.remove());
       markers.length = 0;
@@ -72,8 +78,8 @@
           .addTo(map)
           .bindTooltip(bus.routeName, {
             permanent: true,
-            direction: "top", // text appears above icon
-            offset: [0, -10], // lift it slightly above the icon
+            direction: "top",
+            offset: [0, -10],
             className: "bus-label",
           })
           .bindPopup(`Route ${bus.routeName}`);
@@ -82,6 +88,8 @@
       });
     } catch (err) {
       console.error("Failed to refresh buses:", err);
+    } finally {
+      isFetching = false;
     }
   }
 
@@ -105,7 +113,7 @@
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
 
-    // ✅ Use aoife.png from public folder
+    // ✅ aoife.png from public folder
     const busIcon = L.icon({
       iconUrl: import.meta.env.BASE_URL + "aoife.png",
       iconSize: [32, 32],
@@ -117,7 +125,8 @@
 
     await refreshBuses(routeNames, busIcon);
 
-    setInterval(() => refreshBuses(routeNames, busIcon), 20000);
+    // ✅ slower refresh to avoid 429 errors
+    setInterval(() => refreshBuses(routeNames, busIcon), 30000);
   });
 </script>
 
@@ -150,14 +159,14 @@
     margin-right: 10px;
   }
 
-  /* ✅ Route label styling (smaller + on top of icon) */
+  /* Route label styling (smaller + above icon) */
   :global(.bus-label) {
     background: rgba(26, 115, 232, 0.9);
     color: white;
     border: none;
     border-radius: 4px;
     font-weight: bold;
-    font-size: 10px; /* slightly smaller */
+    font-size: 10px;
     padding: 1px 4px;
     white-space: nowrap;
     text-align: center;
