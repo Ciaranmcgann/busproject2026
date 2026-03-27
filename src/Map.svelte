@@ -6,7 +6,6 @@
   let map;
   const markers = [];
 
-  // Build a routeId -> shortName lookup from static GTFS routes.txt
   async function fetchRouteNames() {
     try {
       const res = await fetch(
@@ -17,13 +16,16 @@
       const headers = lines[0].split(",");
       const idIdx = headers.indexOf("route_id");
       const nameIdx = headers.indexOf("route_short_name");
+
       const lookup = {};
+
       for (let i = 1; i < lines.length; i++) {
         const cols = lines[i].split(",");
         if (cols[idIdx] && cols[nameIdx]) {
           lookup[cols[idIdx].trim()] = cols[nameIdx].trim();
         }
       }
+
       return lookup;
     } catch (e) {
       console.warn("Could not load route names", e);
@@ -32,7 +34,6 @@
   }
 
   async function fetchBuses(routeNames) {
-    // FIX 1: use import.meta.env.BASE_URL so path works on GitHub Pages
     const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
     const root = await protobuf.load(protoUrl);
     const FeedMessage = root.lookupType("transit_realtime.FeedMessage");
@@ -40,6 +41,7 @@
     const res = await fetch(
       "https://bus-times.ciaranjmcgann.workers.dev/vehicles"
     );
+
     const buffer = await res.arrayBuffer();
     const feed = FeedMessage.decode(new Uint8Array(buffer));
 
@@ -48,8 +50,8 @@
       .filter((v) => v && v.position)
       .map((v) => {
         const routeId = v.trip?.routeId || "";
-        // FIX 3: look up human-readable short name, fall back to routeId
         const routeName = routeNames[routeId] || routeId || "N/A";
+
         return {
           routeName,
           lat: v.position.latitude,
@@ -59,34 +61,53 @@
   }
 
   async function refreshBuses(routeNames, busIcon) {
-    // Clear old markers
-    markers.forEach((m) => m.remove());
-    markers.length = 0;
+    try {
+      markers.forEach((m) => m.remove());
+      markers.length = 0;
 
-    const buses = await fetchBuses(routeNames);
-    buses.forEach((bus) => {
-      const marker = L.marker([bus.lat, bus.lng], { icon: busIcon })
-        .addTo(map)
-        // FIX 3: show route short name on the marker itself
-        .bindTooltip(bus.routeName, {
-          permanent: true,
-          direction: "top",
-          className: "bus-label",
-        })
-        .bindPopup(`Route ${bus.routeName}`);
-      markers.push(marker);
-    });
+      const buses = await fetchBuses(routeNames);
+
+      buses.forEach((bus) => {
+        const marker = L.marker([bus.lat, bus.lng], { icon: busIcon })
+          .addTo(map)
+          .bindTooltip(bus.routeName, {
+            permanent: true,
+            direction: "top", // text appears above icon
+            offset: [0, -10], // lift it slightly above the icon
+            className: "bus-label",
+          })
+          .bindPopup(`Route ${bus.routeName}`);
+
+        markers.push(marker);
+      });
+    } catch (err) {
+      console.error("Failed to refresh buses:", err);
+    }
   }
 
   onMount(async () => {
-    map = L.map("map").setView([53.35, -6.26], 12);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(
-      map
-    );
+    map = L.map("map", {
+      zoomControl: false,
+      dragging: true,
+      touchZoom: true,
+      doubleClickZoom: true,
+      scrollWheelZoom: false,
+    }).setView([53.35, -6.26], 12);
 
-    // FIX 1: use BASE_URL for icon path too
+    L.control
+      .zoom({
+        position: "bottomright",
+      })
+      .addTo(map);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(map);
+
+    // ✅ Use aoife.png from public folder
     const busIcon = L.icon({
-      iconUrl: import.meta.env.BASE_URL + "bus.png",
+      iconUrl: import.meta.env.BASE_URL + "aoife.png",
       iconSize: [32, 32],
       iconAnchor: [16, 32],
       popupAnchor: [0, -32],
@@ -96,28 +117,49 @@
 
     await refreshBuses(routeNames, busIcon);
 
-    // FIX 2: refresh buses every 15 seconds
-    setInterval(() => refreshBuses(routeNames, busIcon), 15000);
+    setInterval(() => refreshBuses(routeNames, busIcon), 20000);
   });
 </script>
 
 <div id="map"></div>
 
 <style>
-  #map {
+  :global(html, body) {
+    margin: 0;
+    padding: 0;
     height: 100%;
-    width: 100%;
+    overflow: hidden;
   }
 
-  /* Style the route name labels on the map */
+  #map {
+    height: 100vh;
+    width: 100vw;
+    touch-action: pan-x pan-y;
+  }
+
+  /* Bigger zoom buttons for mobile */
+  :global(.leaflet-control-zoom a) {
+    width: 44px;
+    height: 44px;
+    line-height: 44px;
+    font-size: 20px;
+  }
+
+  :global(.leaflet-control-zoom) {
+    margin-bottom: 20px;
+    margin-right: 10px;
+  }
+
+  /* ✅ Route label styling (smaller + on top of icon) */
   :global(.bus-label) {
-    background: #1a73e8;
+    background: rgba(26, 115, 232, 0.9);
     color: white;
     border: none;
     border-radius: 4px;
     font-weight: bold;
-    font-size: 11px;
-    padding: 2px 5px;
+    font-size: 10px; /* slightly smaller */
+    padding: 1px 4px;
     white-space: nowrap;
+    text-align: center;
   }
 </style>
