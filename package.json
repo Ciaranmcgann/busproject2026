@@ -1,11 +1,14 @@
 {
   "name": "busproject2026",
   "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "homepage": "https://ciaranmcgann.github.io/busproject2026",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "vite build && gh-pages -d dist"
   },
   "dependencies": {
     "leaflet": "^1.9.4",
@@ -14,6 +17,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^2.0.0",
+    "gh-pages": "^6.3.0",
     "vite": "^4.0.0"
   }
 }

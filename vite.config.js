@@ -1,7 +1,7 @@
-import { defineConfig } from 'vite';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { defineConfig } from 'vite'
+import { svelte } from '@sveltejs/vite-plugin-svelte'
 
 export default defineConfig({
-  base: '/busproject2026/',
-  plugins: [svelte()]
-});
+  plugins: [svelte()],
+  base: '/busproject2026/',  // ← add this line
+})
