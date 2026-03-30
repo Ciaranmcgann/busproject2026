@@ -6,29 +6,23 @@
   let map;
   const markers = [];
 
-  // ✅ prevents overlapping API calls (helps avoid 429 errors)
   let isFetching = false;
+  let FeedMessage;
 
   async function fetchRouteNames() {
     try {
       const res = await fetch(
         "https://bus-times.ciaranjmcgann.workers.dev/routes"
       );
-      const text = await res.text();
-      const lines = text.trim().split("\n");
-      const headers = lines[0].split(",");
-      const idIdx = headers.indexOf("route_id");
-      const nameIdx = headers.indexOf("route_short_name");
-
+      const routes = await res.json();
       const lookup = {};
-
-      for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(",");
-        if (cols[idIdx] && cols[nameIdx]) {
-          lookup[cols[idIdx].trim()] = cols[nameIdx].trim();
+      for (const r of routes) {
+        if (r.route_id && r.route_short_name) {
+          lookup[r.route_id.trim()] = r.route_short_name.trim();
         }
       }
-
+      console.log("Loaded routes:", Object.keys(lookup).length);
+      console.log("Sample:", Object.entries(lookup).slice(0, 3));
       return lookup;
     } catch (e) {
       console.warn("Could not load route names", e);
@@ -37,30 +31,43 @@
   }
 
   async function fetchBuses(routeNames) {
-    const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
-    const root = await protobuf.load(protoUrl);
-    const FeedMessage = root.lookupType("transit_realtime.FeedMessage");
+    try {
+      const res = await fetch(
+        "https://bus-times.ciaranjmcgann.workers.dev/vehicles"
+      );
 
-    const res = await fetch(
-      "https://bus-times.ciaranjmcgann.workers.dev/vehicles"
-    );
+      if (!res.ok) {
+        console.warn("API error:", res.status);
+        if (res.status === 429) {
+          console.warn("Rate limited — skipping refresh");
+        }
+        return [];
+      }
 
-    const buffer = await res.arrayBuffer();
-    const feed = FeedMessage.decode(new Uint8Array(buffer));
+      const buffer = await res.arrayBuffer();
+      const feed = FeedMessage.decode(new Uint8Array(buffer));
 
-    return feed.entity
-      .map((e) => e.vehicle)
-      .filter((v) => v && v.position)
-      .map((v) => {
-        const routeId = v.trip?.routeId || "";
-        const routeName = routeNames[routeId] || routeId || "N/A";
-
-        return {
-          routeName,
-          lat: v.position.latitude,
-          lng: v.position.longitude,
-        };
+      const sample = feed.entity.slice(0, 3);
+      sample.forEach((e) => {
+        console.log("routeId from feed:", e.vehicle?.trip?.routeId);
       });
+
+      return feed.entity
+        .map((e) => e.vehicle)
+        .filter((v) => v && v.position)
+        .map((v) => {
+          const routeId = v.trip?.routeId || "";
+          const routeName = routeNames[routeId] || routeId || "N/A";
+          return {
+            routeName,
+            lat: v.position.latitude,
+            lng: v.position.longitude,
+          };
+        });
+    } catch (err) {
+      console.error("Fetch buses failed:", err);
+      return [];
+    }
   }
 
   async function refreshBuses(routeNames, busIcon) {
@@ -79,11 +86,9 @@
           .bindTooltip(bus.routeName, {
             permanent: true,
             direction: "top",
-            offset: [0, -10],
             className: "bus-label",
           })
           .bindPopup(`Route ${bus.routeName}`);
-
         markers.push(marker);
       });
     } catch (err) {
@@ -102,18 +107,17 @@
       scrollWheelZoom: false,
     }).setView([53.35, -6.26], 12);
 
-    L.control
-      .zoom({
-        position: "bottomright",
-      })
-      .addTo(map);
+    L.control.zoom({ position: "bottomright" }).addTo(map);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
 
-    // ✅ aoife.png from public folder
+    const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
+    const root = await protobuf.load(protoUrl);
+    FeedMessage = root.lookupType("transit_realtime.FeedMessage");
+
     const busIcon = L.icon({
       iconUrl: import.meta.env.BASE_URL + "aoife.png",
       iconSize: [40, 40],
@@ -125,8 +129,7 @@
 
     await refreshBuses(routeNames, busIcon);
 
-    // ✅ slower refresh to avoid 429 errors
-    setInterval(() => refreshBuses(routeNames, busIcon), 30000);
+    setInterval(() => refreshBuses(routeNames, busIcon), 45000);
   });
 </script>
 
@@ -146,7 +149,6 @@
     touch-action: pan-x pan-y;
   }
 
-  /* Bigger zoom buttons for mobile */
   :global(.leaflet-control-zoom a) {
     width: 44px;
     height: 44px;
@@ -159,16 +161,15 @@
     margin-right: 10px;
   }
 
-  /* Route label styling (smaller + above icon) */
   :global(.bus-label) {
-    background: rgba(26, 115, 232, 0.9);
+    background: #1a73e8;
     color: white;
     border: none;
     border-radius: 4px;
     font-weight: bold;
-    font-size: 5px;
-    padding: 1px 4px;
+    font-size: 11px;
+    padding: 2px 5px;
     white-space: nowrap;
-    text-align: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   }
 </style>
