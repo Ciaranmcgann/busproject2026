@@ -116,7 +116,7 @@
     // ✅ aoife.png from public folder
     const busIcon = L.icon({
       iconUrl: import.meta.env.BASE_URL + "aoife.png",
-      iconSize: [32, 32],
+      iconSize: [40, 40],
       iconAnchor: [16, 32],
       popupAnchor: [0, -32],
     });
@@ -166,7 +166,7 @@
     border: none;
     border-radius: 4px;
     font-weight: bold;
-    font-size: 10px;
+    font-size: 5px;
     padding: 1px 4px;
     white-space: nowrap;
     text-align: center;
