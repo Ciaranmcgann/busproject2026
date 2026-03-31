@@ -5,11 +5,11 @@
 
   let map;
   const markers = [];
+  let locationMarker = null;
 
   let isFetching = false;
   let FeedMessage;
 
-  // ===== FETCH ROUTE NAMES =====
   async function fetchRouteNames() {
     try {
       const res = await fetch(
@@ -17,13 +17,11 @@
       );
       const routes = await res.json();
       const lookup = {};
-
       for (const r of routes) {
         if (r.route_id && r.route_short_name) {
           lookup[r.route_id.trim()] = r.route_short_name.trim();
         }
       }
-
       console.log("Loaded routes:", Object.keys(lookup).length);
       return lookup;
     } catch (e) {
@@ -32,7 +30,25 @@
     }
   }
 
-  // ===== FETCH BUSES =====
+  function makeBusIcon(bearing, baseUrl) {
+    const rotation = bearing - 0 || 0; // change this to -90 when movement works
+    return L.divIcon({
+      className: "",
+      html: `
+        <div class="bus-marker-wrap">
+          <img
+            src="${baseUrl}bus.png"
+            class="bus-img"
+            style="transform: rotate(${rotation}deg);"
+          />
+        </div>
+      `,
+      iconSize: [40, 40],
+      iconAnchor: [20, 20],
+      popupAnchor: [0, -20],
+    });
+  }
+
   async function fetchBuses(routeNames) {
     try {
       const res = await fetch(
@@ -54,26 +70,23 @@
         .map((e) => e.vehicle)
         .filter((v) => v && v.position)
         .map((v) => {
+          console.log("bearing:", v.position.bearing);
+
           const routeId = v.trip?.routeId || "";
 
-          // 🔥 BULLETPROOF MATCHING
           let routeName = routeNames[routeId];
-
           if (!routeName) {
             routeName = Object.values(routeNames).find((name) =>
               routeId.includes(name)
             );
           }
-
           routeName = routeName || "N/A";
-
-          // Debug (optional)
-          console.log("MATCH:", routeId, "→", routeName);
 
           return {
             routeName,
             lat: v.position.latitude,
             lng: v.position.longitude,
+            bearing: v.position.bearing || 0,
           };
         });
     } catch (err) {
@@ -82,22 +95,22 @@
     }
   }
 
-  // ===== REFRESH MARKERS =====
-  async function refreshBuses(routeNames, busIcon) {
+  async function refreshBuses(routeNames, baseUrl) {
     if (isFetching) return;
     isFetching = true;
 
     try {
-      // Remove old markers
       markers.forEach((m) => m.remove());
       markers.length = 0;
 
       const buses = await fetchBuses(routeNames);
 
       buses.forEach((bus) => {
-        const marker = L.marker([bus.lat, bus.lng], { icon: busIcon })
+        const icon = makeBusIcon(bus.bearing, baseUrl);
+
+        const marker = L.marker([bus.lat, bus.lng], { icon })
           .addTo(map)
-          .bindTooltip(`🚌 ${bus.routeName}`, {
+          .bindTooltip(` ${bus.routeName}`, {
             permanent: true,
             direction: "top",
             className: "bus-label",
@@ -113,7 +126,12 @@
     }
   }
 
-  // ===== INIT =====
+  function locateMe() {
+    if (locationMarker) {
+      map.setView(locationMarker.getLatLng(), 15);
+    }
+  }
+
   onMount(async () => {
     map = L.map("map", {
       zoomControl: false,
@@ -130,28 +148,48 @@
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
 
-    // Load protobuf
     const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
     const root = await protobuf.load(protoUrl);
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
 
-    // Bus icon
-    const busIcon = L.icon({
-      iconUrl: import.meta.env.BASE_URL + "aoife.png",
-      iconSize: [40, 40],
-      iconAnchor: [16, 32],
-      popupAnchor: [0, -32],
-    });
+    const baseUrl = import.meta.env.BASE_URL;
 
     const routeNames = await fetchRouteNames();
+    await refreshBuses(routeNames, baseUrl);
+    setInterval(() => refreshBuses(routeNames, baseUrl), 45000);
 
-    await refreshBuses(routeNames, busIcon);
-
-    setInterval(() => refreshBuses(routeNames, busIcon), 45000);
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(
+        (pos) => {
+          const { latitude, longitude } = pos.coords;
+          if (locationMarker) {
+            locationMarker.setLatLng([latitude, longitude]);
+          } else {
+            locationMarker = L.circleMarker([latitude, longitude], {
+              radius: 10,
+              fillColor: "#4285F4",
+              color: "#fff",
+              weight: 2,
+              opacity: 1,
+              fillOpacity: 1,
+            })
+              .addTo(map)
+              .bindPopup("You are here");
+            map.setView([latitude, longitude], 15);
+          }
+        },
+        (err) => {
+          console.warn("Geolocation error:", err);
+        },
+        { enableHighAccuracy: true }
+      );
+    }
   });
 </script>
 
 <div id="map"></div>
+
+<button class="locate-btn" on:click={locateMe}>📍</button>
 
 <style>
   :global(html, body) {
@@ -179,15 +217,50 @@
     margin-right: 10px;
   }
 
-  :global(.bus-label) {
-    background: #1a73e8;
-    color: white;
-    border: none;
+  :global(.leaflet-tooltip.bus-label) {
+    background: #1a73e8 !important;
+    color: white !important;
+    border: none !important;
     border-radius: 4px;
     font-weight: bold;
     font-size: 11px;
     padding: 2px 5px;
-    white-space: nowrap;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+
+  :global(.bus-marker-wrap) {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  :global(.bus-img) {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+    transform-origin: center center;
+  }
+
+  .locate-btn {
+    position: fixed;
+    bottom: 100px;
+    right: 16px;
+    z-index: 1000;
+    width: 44px;
+    height: 44px;
+    border-radius: 8px;
+    border: none;
+    background: white;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    font-size: 22px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .locate-btn:active {
+    background: #f0f0f0;
   }
 </style>
