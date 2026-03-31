@@ -156,7 +156,7 @@
 
     if ((searchTerm || selectedRoute) && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
-      map.fitBounds(group.getBounds().pad(0.1));
+      map.fitBounds(group.getBounds().pad(0.05));
     }
   }
 
@@ -328,14 +328,12 @@
 </button>
 
 <style>
-  input {
-    font-size: 16px;
-  }
   :global(html, body) {
     margin: 0;
     padding: 0;
     height: 100%;
     overflow: hidden;
+    touch-action: pan-x pan-y;
   }
 
   .map {
