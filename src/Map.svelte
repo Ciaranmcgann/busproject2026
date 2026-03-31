@@ -1,25 +1,25 @@
 <script>
   import { onMount } from "svelte";
   import L from "leaflet";
+  import "leaflet.markercluster";
   import protobuf from "protobufjs";
-  import { createEventDispatcher } from "svelte";
 
   export let searchTerm = "";
   export let favourites = [];
   export let favouritesMode = false;
 
-  const dispatch = createEventDispatcher();
-
   let map;
   let mapContainer;
 
-  const markers = [];
+  // All bus data — never mutated after creation
+  let busData = []; // { routeName, lat, lng, bearing, marker }
+
+  let clusterGroup;
   let locationMarker = null;
 
   let isFetching = false;
   let FeedMessage;
   let buses = [];
-
   let selectedRoute = "";
 
   const DUBLIN_BOUNDS = {
@@ -39,11 +39,7 @@
   }
 
   function normalize(str) {
-    return (str || "").toLowerCase().replace(/\s/g, "");
-  }
-
-  function isFavourite(route) {
-    return favourites.includes(normalize(route));
+    return (str || "").replace(/\s/g, "").toLowerCase();
   }
 
   async function fetchRouteNames() {
@@ -52,7 +48,6 @@
         "https://bus-times.ciaranjmcgann.workers.dev/routes"
       );
       const routes = await res.json();
-
       const lookup = {};
       for (const r of routes) {
         if (r.route_id && r.route_short_name) {
@@ -66,14 +61,14 @@
     }
   }
 
-  function makeBusIcon(bearing, baseUrl) {
+  function makeBusIcon(bearing) {
     const rotation = bearing || 0;
     return L.divIcon({
       className: "",
       html: `
         <div class="bus-marker-wrap">
           <img
-            src="${baseUrl}bus.png"
+            src="${import.meta.env.BASE_URL}bus.png"
             class="bus-img"
             style="transform: rotate(${rotation}deg);"
           />
@@ -90,19 +85,15 @@
       const res = await fetch(
         "https://bus-times.ciaranjmcgann.workers.dev/vehicles"
       );
-
       if (!res.ok) return [];
-
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
-
       return feed.entity
         .map((e) => e.vehicle)
         .filter((v) => v && v.position)
         .map((v) => {
           const routeId = v.trip?.routeId || "";
           const routeName = routeNames[routeId] || "N/A";
-
           return {
             routeName,
             lat: v.position.latitude,
@@ -117,127 +108,108 @@
     }
   }
 
-  function updateMarkerStyles() {
-    const selected = normalize(selectedRoute);
-
-    markers.forEach((marker) => {
-      const route = marker._busRoute;
-      const el = marker.getElement();
-
-      if (!el) return;
-
-      if (selectedRoute && route === selected) {
-        el.classList.add("selected-bus");
-      } else {
-        el.classList.remove("selected-bus");
-      }
-    });
-  }
-
-  function applySearch() {
+  // Returns true if a bus should be visible given current filters
+  function shouldShow(normalizedRoute) {
     const term = normalize(searchTerm);
     const selected = normalize(selectedRoute);
 
+    const matchesSearch = !searchTerm || normalizedRoute.startsWith(term);
+    const matchesSelected = !selectedRoute || normalizedRoute === selected;
+    const matchesFavourites =
+      !favouritesMode || favourites.includes(normalizedRoute);
+
+    return matchesSearch && matchesSelected && matchesFavourites;
+  }
+
+  // Viewport culling — only add markers that are in or near current bounds
+  function isNearViewport(lat, lng) {
+    const bounds = map.getBounds().pad(0.3); // 30% padding so markers don't pop in aggressively
+    return bounds.contains([lat, lng]);
+  }
+
+  function applySearch() {
+    if (!map || !clusterGroup) return;
+
+    const term = normalize(searchTerm);
     const visibleMarkers = [];
 
-    markers.forEach((marker) => {
-      const route = marker._busRoute;
+    clusterGroup.clearLayers();
 
-      // ⭐ favourites mode filter
-      if (favouritesMode && !isFavourite(route)) {
-        if (map.hasLayer(marker)) map.removeLayer(marker);
-        return;
+    busData.forEach((bus) => {
+      const visible = shouldShow(bus.normalizedRoute);
+      const inViewport = isNearViewport(bus.lat, bus.lng);
+
+      if (visible && inViewport) {
+        clusterGroup.addLayer(bus.marker);
+        visibleMarkers.push(bus.marker);
       }
 
-      const matchesSearch = !searchTerm || route.startsWith(term);
-      const matchesSelected = !selectedRoute || route === selected;
-
-      const isVisible = matchesSearch && matchesSelected;
-
-      const el = marker.getElement();
-
-      if (isVisible) {
-        if (!map.hasLayer(marker)) marker.addTo(map);
-        marker.setOpacity(1);
-
-        if (el) el.style.opacity = "1";
-
-        visibleMarkers.push(marker);
-      } else {
-        if (map.hasLayer(marker)) map.removeLayer(marker);
+      // Update selected style
+      const el = bus.marker.getElement?.();
+      if (el) {
+        if (selectedRoute && bus.normalizedRoute === normalize(selectedRoute)) {
+          el.classList.add("selected-bus");
+        } else {
+          el.classList.remove("selected-bus");
+        }
       }
     });
 
-    updateMarkerStyles();
-
-    // only zoom when searching
     if (searchTerm && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
       map.fitBounds(group.getBounds().pad(0.05));
     }
   }
 
-  async function refreshBuses(routeNames, baseUrl) {
+  async function refreshBuses(routeNames) {
     if (isFetching) return;
     isFetching = true;
 
     try {
       const newBuses = await fetchBuses(routeNames);
 
-      if (markers.length === 0) {
+      if (busData.length === 0) {
+        // First load — create all markers
         buses = newBuses;
 
         newBuses.forEach((bus) => {
-          const icon = makeBusIcon(bus.bearing, baseUrl);
-
-          const marker = L.marker([bus.lat, bus.lng], { icon })
-            .addTo(map)
+          const normalizedRoute = normalize(bus.routeName);
+          const marker = L.marker([bus.lat, bus.lng], {
+            icon: makeBusIcon(bus.bearing),
+          })
             .bindTooltip(bus.routeName, {
               permanent: true,
               direction: "top",
               className: "bus-label",
             })
-            .bindPopup(() => {
-              const container = document.createElement("div");
-
-              const btn = document.createElement("button");
-              btn.textContent = isFavourite(bus.routeName)
-                ? "★ Remove Favourite"
-                : "☆ Add Favourite";
-
-              btn.style.cursor = "pointer";
-
-              btn.onclick = () => {
-                dispatch("addFavourite", bus.routeName);
-              };
-
-              container.appendChild(btn);
-              return container;
-            })
-            .on("click", () => {
-              selectedRoute = marker._busRoute;
+            .on("click", (e) => {
+              L.DomEvent.stopPropagation(e);
+              selectedRoute = normalizedRoute;
               applySearch();
             });
 
-          marker._busRoute = normalize(bus.routeName);
-          markers.push(marker);
+          busData.push({ ...bus, normalizedRoute, marker });
         });
 
         applySearch();
       } else {
+        // Subsequent refreshes — update positions silently
         newBuses.forEach((newBus, i) => {
-          const marker = markers[i];
-          if (!marker) return;
+          const entry = busData[i];
+          if (!entry) return;
 
-          marker.setLatLng([newBus.lat, newBus.lng]);
+          entry.lat = newBus.lat;
+          entry.lng = newBus.lng;
+          entry.bearing = newBus.bearing;
 
-          const img = marker.getElement()?.querySelector("img");
-          if (img) {
-            img.style.transform = `rotate(${newBus.bearing || 0}deg)`;
-          }
+          entry.marker.setLatLng([newBus.lat, newBus.lng]);
+          const img = entry.marker.getElement?.()?.querySelector("img");
+          if (img) img.style.transform = `rotate(${newBus.bearing || 0}deg)`;
         });
 
         buses = newBuses;
+        // Re-apply viewport culling after position update
+        applySearch();
       }
     } catch (err) {
       console.error("Failed to refresh buses:", err);
@@ -262,8 +234,9 @@
       boxZoom: true,
       keyboard: true,
       zoomSnap: 0.5,
-      zoomDelta: 1,
       maxZoom: 19,
+      zoomDelta: 1,
+      tap: false, // improves iOS touch performance
       maxBounds: [
         [53.14, -6.63],
         [53.46, -6.0],
@@ -276,22 +249,30 @@
       [53.46, -6.0],
     ]);
 
-    setTimeout(() => {
-      map.invalidateSize();
-    }, 0);
+    setTimeout(() => map.invalidateSize(), 0);
 
-    map.on("zoomstart", () => {
-      markers.forEach((m) => {
-        const el = m.getElement();
-        if (el) el.style.opacity = "0";
-      });
+    // Cluster group — disables clustering at high zoom so individual buses show
+    clusterGroup = L.markerClusterGroup({
+      disableClusteringAtZoom: 13,
+      maxClusterRadius: 40,
+      spiderfyOnMaxZoom: false,
+      showCoverageOnHover: false,
+      iconCreateFunction(cluster) {
+        const count = cluster.getChildCount();
+        return L.divIcon({
+          html: `<div class="cluster-icon">${count}</div>`,
+          className: "",
+          iconSize: [36, 36],
+          iconAnchor: [18, 18],
+        });
+      },
     });
 
-    map.on("zoomend", () => {
-      markers.forEach((m) => {
-        const el = m.getElement();
-        if (el) el.style.opacity = "1";
-      });
+    map.addLayer(clusterGroup);
+
+    // Re-apply viewport culling on move/zoom
+    map.on("moveend zoomend", () => {
+      applySearch();
     });
 
     map.on("click", () => {
@@ -302,10 +283,11 @@
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: "&copy; OpenStreetMap contributors",
+      updateWhenIdle: false,
+      updateWhenZooming: true,
     }).addTo(map);
 
     const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
-    const baseUrl = import.meta.env.BASE_URL;
 
     const [root, routeNames] = await Promise.all([
       protobuf.load(protoUrl),
@@ -314,14 +296,13 @@
 
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
 
-    refreshBuses(routeNames, baseUrl);
-    setInterval(() => refreshBuses(routeNames, baseUrl), 45000);
+    refreshBuses(routeNames);
+    setInterval(() => refreshBuses(routeNames), 45000);
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
         (pos) => {
           const { latitude, longitude } = pos.coords;
-
           if (locationMarker) {
             locationMarker.setLatLng([latitude, longitude]);
           } else {
@@ -335,7 +316,6 @@
             })
               .addTo(map)
               .bindPopup("You are here");
-
             map.setView([latitude, longitude], 15);
           }
         },
@@ -348,9 +328,11 @@
   let searchDebounce;
   $: {
     searchTerm;
+    favourites;
+    favouritesMode;
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(() => {
-      if (map && markers.length) applySearch();
+      if (map && busData.length) applySearch();
     }, 300);
   }
 </script>
@@ -359,7 +341,11 @@
 
 {#if !buses.length}
   <div class="loading">
-    <img src="{import.meta.env.BASE_URL}bus.png" class="spinner" />
+    <img
+      src="{import.meta.env.BASE_URL}bus.png"
+      class="spinner"
+      alt="loading"
+    />
     <span>Loading buses...</span>
   </div>
 {/if}
@@ -387,6 +373,7 @@
     padding: 0;
     height: 100%;
     overflow: hidden;
+    touch-action: pan-x pan-y;
   }
 
   .map {
@@ -420,8 +407,23 @@
 
   :global(.selected-bus) {
     transform: scale(1.4);
-    z-index: 1000;
+    z-index: 1000 !important;
     filter: drop-shadow(0 0 6px rgba(26, 115, 232, 0.9));
+  }
+
+  :global(.cluster-icon) {
+    width: 36px;
+    height: 36px;
+    background: #1a73e8;
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    border: 2px solid white;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   }
 
   .locate-btn {
@@ -429,34 +431,32 @@
     top: 70px;
     right: 10px;
     z-index: 1000;
-
     width: 50px;
     height: 50px;
-
     border: none;
     border-radius: 4px;
     background: white;
     color: #333;
-
     box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
-
     display: flex;
     align-items: center;
     justify-content: center;
-
     cursor: pointer;
+    padding: 0;
+  }
+
+  .locate-btn svg {
+    display: block;
   }
 
   .loading {
     position: fixed;
     inset: 0;
     z-index: 2000;
-
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-
     background: rgba(255, 255, 255, 0.8);
     backdrop-filter: blur(4px);
     gap: 10px;
@@ -475,13 +475,5 @@
     to {
       transform: rotate(360deg);
     }
-  }
-
-  .leaflet-pane,
-  .leaflet-tile,
-  .leaflet-marker-icon,
-  .leaflet-marker-shadow {
-    will-change: transform;
-    transform: translateZ(0);
   }
 </style>

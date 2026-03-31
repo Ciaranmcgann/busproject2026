@@ -7,8 +7,8 @@
   let searchTerm = "";
   let routes = [];
 
-  // ⭐ favourites state
-  let favourites = [];
+  // Load favourites from localStorage on startup
+  let favourites = JSON.parse(localStorage.getItem("bus-favourites") || "[]");
   let favouritesMode = false;
 
   function handleSearch(event) {
@@ -21,25 +21,25 @@
         "https://bus-times.ciaranjmcgann.workers.dev/routes"
       );
       const data = await res.json();
-
-      routes = data.map((r) => r.route_short_name).filter(Boolean);
+      routes = [
+        ...new Set(data.map((r) => r.route_short_name).filter(Boolean)),
+      ].sort();
     } catch (err) {
       console.error(err);
     }
   }
 
-  // ⭐ toggle favourite
   function toggleFavourite(route) {
     const normalized = route.toLowerCase().replace(/\s/g, "");
-
     if (favourites.includes(normalized)) {
       favourites = favourites.filter((f) => f !== normalized);
     } else {
       favourites = [...favourites, normalized];
     }
+    // Save to localStorage whenever it changes
+    localStorage.setItem("bus-favourites", JSON.stringify(favourites));
   }
 
-  // ⭐ toggle favourites mode
   function toggleMode() {
     favouritesMode = !favouritesMode;
   }
@@ -59,10 +59,10 @@
     />
   </main>
 
-  <!-- ⭐ Footer -->
   <Favourites
     {favourites}
     {favouritesMode}
+    allRoutes={routes}
     on:toggleFavourite={(e) => toggleFavourite(e.detail)}
     on:toggleMode={toggleMode}
   />
