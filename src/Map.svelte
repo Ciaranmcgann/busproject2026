@@ -139,9 +139,12 @@
 
       const isVisible = matchesSearch && matchesSelected;
 
+      const el = marker.getElement();
+
       if (isVisible) {
         if (!map.hasLayer(marker)) marker.addTo(map);
         marker.setOpacity(1);
+        if (el) el.style.opacity = "1";
         visibleMarkers.push(marker);
       } else {
         if (map.hasLayer(marker)) map.removeLayer(marker);
@@ -193,7 +196,6 @@
 
           marker.setLatLng([newBus.lat, newBus.lng]);
 
-          // Update rotation without recreating icon (performance fix)
           const img = marker.getElement()?.querySelector("img");
           if (img) {
             img.style.transform = `rotate(${newBus.bearing || 0}deg)`;
@@ -224,8 +226,8 @@
       doubleClickZoom: true,
       boxZoom: true,
       keyboard: true,
-      zoomSnap: 0.25,
-      zoomDelta: 0.5,
+      zoomSnap: 0.5,
+      zoomDelta: 1,
       maxBounds: [
         [53.14, -6.63],
         [53.46, -6.0],
@@ -241,6 +243,21 @@
     setTimeout(() => {
       map.invalidateSize();
     }, 0);
+
+    // ✅ Smooth zoom: fade markers instead of removing them
+    map.on("zoomstart", () => {
+      markers.forEach((m) => {
+        const el = m.getElement();
+        if (el) el.style.opacity = "0";
+      });
+    });
+
+    map.on("zoomend", () => {
+      markers.forEach((m) => {
+        const el = m.getElement();
+        if (el) el.style.opacity = "1";
+      });
+    });
 
     map.on("click", () => {
       selectedRoute = "";
