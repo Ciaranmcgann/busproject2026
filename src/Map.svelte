@@ -9,6 +9,7 @@
   let isFetching = false;
   let FeedMessage;
 
+  // ===== FETCH ROUTE NAMES =====
   async function fetchRouteNames() {
     try {
       const res = await fetch(
@@ -16,13 +17,14 @@
       );
       const routes = await res.json();
       const lookup = {};
+
       for (const r of routes) {
         if (r.route_id && r.route_short_name) {
           lookup[r.route_id.trim()] = r.route_short_name.trim();
         }
       }
+
       console.log("Loaded routes:", Object.keys(lookup).length);
-      console.log("Sample:", Object.entries(lookup).slice(0, 3));
       return lookup;
     } catch (e) {
       console.warn("Could not load route names", e);
@@ -30,6 +32,7 @@
     }
   }
 
+  // ===== FETCH BUSES =====
   async function fetchBuses(routeNames) {
     try {
       const res = await fetch(
@@ -47,17 +50,26 @@
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
 
-      const sample = feed.entity.slice(0, 3);
-      sample.forEach((e) => {
-        console.log("routeId from feed:", e.vehicle?.trip?.routeId);
-      });
-
       return feed.entity
         .map((e) => e.vehicle)
         .filter((v) => v && v.position)
         .map((v) => {
           const routeId = v.trip?.routeId || "";
-          const routeName = routeNames[routeId] || routeId || "N/A";
+
+          // 🔥 BULLETPROOF MATCHING
+          let routeName = routeNames[routeId];
+
+          if (!routeName) {
+            routeName = Object.values(routeNames).find((name) =>
+              routeId.includes(name)
+            );
+          }
+
+          routeName = routeName || "N/A";
+
+          // Debug (optional)
+          console.log("MATCH:", routeId, "→", routeName);
+
           return {
             routeName,
             lat: v.position.latitude,
@@ -70,11 +82,13 @@
     }
   }
 
+  // ===== REFRESH MARKERS =====
   async function refreshBuses(routeNames, busIcon) {
     if (isFetching) return;
     isFetching = true;
 
     try {
+      // Remove old markers
       markers.forEach((m) => m.remove());
       markers.length = 0;
 
@@ -83,12 +97,13 @@
       buses.forEach((bus) => {
         const marker = L.marker([bus.lat, bus.lng], { icon: busIcon })
           .addTo(map)
-          .bindTooltip(bus.routeName, {
+          .bindTooltip(`🚌 ${bus.routeName}`, {
             permanent: true,
             direction: "top",
             className: "bus-label",
           })
           .bindPopup(`Route ${bus.routeName}`);
+
         markers.push(marker);
       });
     } catch (err) {
@@ -98,6 +113,7 @@
     }
   }
 
+  // ===== INIT =====
   onMount(async () => {
     map = L.map("map", {
       zoomControl: false,
@@ -114,10 +130,12 @@
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
 
+    // Load protobuf
     const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
     const root = await protobuf.load(protoUrl);
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
 
+    // Bus icon
     const busIcon = L.icon({
       iconUrl: import.meta.env.BASE_URL + "aoife.png",
       iconSize: [40, 40],

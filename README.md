@@ -1,5 +1,5 @@
 things to do:
-convert routes to show bus names
+convert routes to show bus names: done
 get bus showing direction
 be able to favourite buses and toggle them on ony
 mobile optimisation
