@@ -1,10 +1,15 @@
 <script>
   import Map from "./Map.svelte";
   import SearchBox from "./SearchBox.svelte";
+  import Favourites from "./Favouritesfooter.svelte";
   import { onMount } from "svelte";
 
   let searchTerm = "";
   let routes = [];
+
+  // ⭐ favourites state
+  let favourites = [];
+  let favouritesMode = false;
 
   function handleSearch(event) {
     searchTerm = event.detail;
@@ -23,6 +28,22 @@
     }
   }
 
+  // ⭐ toggle favourite
+  function toggleFavourite(route) {
+    const normalized = route.toLowerCase().replace(/\s/g, "");
+
+    if (favourites.includes(normalized)) {
+      favourites = favourites.filter((f) => f !== normalized);
+    } else {
+      favourites = [...favourites, normalized];
+    }
+  }
+
+  // ⭐ toggle favourites mode
+  function toggleMode() {
+    favouritesMode = !favouritesMode;
+  }
+
   onMount(loadRoutes);
 </script>
 
@@ -30,8 +51,21 @@
   <SearchBox on:search={handleSearch} {routes} />
 
   <main>
-    <Map {searchTerm} />
+    <Map
+      {searchTerm}
+      {favourites}
+      {favouritesMode}
+      on:addFavourite={(e) => toggleFavourite(e.detail)}
+    />
   </main>
+
+  <!-- ⭐ Footer -->
+  <Favourites
+    {favourites}
+    {favouritesMode}
+    on:toggleFavourite={(e) => toggleFavourite(e.detail)}
+    on:toggleMode={toggleMode}
+  />
 </div>
 
 <style>

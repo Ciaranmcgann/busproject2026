@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "leaflet": "^1.9.4",
+    "leaflet.markercluster": "^1.5.3",
     "protobufjs": "^8.0.0",
     "svelte": "^4.0.0"
   },

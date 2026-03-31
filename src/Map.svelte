@@ -2,8 +2,13 @@
   import { onMount } from "svelte";
   import L from "leaflet";
   import protobuf from "protobufjs";
+  import { createEventDispatcher } from "svelte";
 
   export let searchTerm = "";
+  export let favourites = [];
+  export let favouritesMode = false;
+
+  const dispatch = createEventDispatcher();
 
   let map;
   let mapContainer;
@@ -34,7 +39,11 @@
   }
 
   function normalize(str) {
-    return (str || "").replace(/\s/g, "").toLowerCase();
+    return (str || "").toLowerCase().replace(/\s/g, "");
+  }
+
+  function isFavourite(route) {
+    return favourites.includes(normalize(route));
   }
 
   async function fetchRouteNames() {
@@ -134,6 +143,12 @@
     markers.forEach((marker) => {
       const route = marker._busRoute;
 
+      // ⭐ favourites mode filter
+      if (favouritesMode && !isFavourite(route)) {
+        if (map.hasLayer(marker)) map.removeLayer(marker);
+        return;
+      }
+
       const matchesSearch = !searchTerm || route.startsWith(term);
       const matchesSelected = !selectedRoute || route === selected;
 
@@ -144,7 +159,9 @@
       if (isVisible) {
         if (!map.hasLayer(marker)) marker.addTo(map);
         marker.setOpacity(1);
+
         if (el) el.style.opacity = "1";
+
         visibleMarkers.push(marker);
       } else {
         if (map.hasLayer(marker)) map.removeLayer(marker);
@@ -153,7 +170,8 @@
 
     updateMarkerStyles();
 
-    if ((searchTerm || selectedRoute) && visibleMarkers.length > 0) {
+    // only zoom when searching
+    if (searchTerm && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
       map.fitBounds(group.getBounds().pad(0.05));
     }
@@ -178,6 +196,23 @@
               permanent: true,
               direction: "top",
               className: "bus-label",
+            })
+            .bindPopup(() => {
+              const container = document.createElement("div");
+
+              const btn = document.createElement("button");
+              btn.textContent = isFavourite(bus.routeName)
+                ? "★ Remove Favourite"
+                : "☆ Add Favourite";
+
+              btn.style.cursor = "pointer";
+
+              btn.onclick = () => {
+                dispatch("addFavourite", bus.routeName);
+              };
+
+              container.appendChild(btn);
+              return container;
             })
             .on("click", () => {
               selectedRoute = marker._busRoute;
@@ -228,6 +263,7 @@
       keyboard: true,
       zoomSnap: 0.5,
       zoomDelta: 1,
+      maxZoom: 19,
       maxBounds: [
         [53.14, -6.63],
         [53.46, -6.0],
@@ -244,7 +280,6 @@
       map.invalidateSize();
     }, 0);
 
-    // ✅ Smooth zoom: fade markers instead of removing them
     map.on("zoomstart", () => {
       markers.forEach((m) => {
         const el = m.getElement();
@@ -267,8 +302,6 @@
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: "&copy; OpenStreetMap contributors",
-      updateWhenIdle: false,
-      updateWhenZooming: true,
     }).addTo(map);
 
     const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
@@ -354,7 +387,6 @@
     padding: 0;
     height: 100%;
     overflow: hidden;
-    touch-action: pan-x pan-y;
   }
 
   .map {
@@ -413,11 +445,6 @@
     justify-content: center;
 
     cursor: pointer;
-    padding: 0;
-  }
-
-  .locate-btn svg {
-    display: block;
   }
 
   .loading {
@@ -432,7 +459,6 @@
 
     background: rgba(255, 255, 255, 0.8);
     backdrop-filter: blur(4px);
-
     gap: 10px;
   }
 
