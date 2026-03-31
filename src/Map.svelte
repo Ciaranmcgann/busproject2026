@@ -11,9 +11,7 @@
   let map;
   let mapContainer;
 
-  // All bus data — never mutated after creation
-  let busData = []; // { routeName, lat, lng, bearing, marker }
-
+  let busData = [];
   let clusterGroup;
   let locationMarker = null;
 
@@ -89,12 +87,16 @@
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
       return feed.entity
-        .map((e) => e.vehicle)
-        .filter((v) => v && v.position)
-        .map((v) => {
+        .map((e) => ({
+          id: e.id,
+          vehicle: e.vehicle,
+        }))
+        .filter(({ vehicle: v }) => v && v.position)
+        .map(({ id, vehicle: v }) => {
           const routeId = v.trip?.routeId || "";
           const routeName = routeNames[routeId] || "N/A";
           return {
+            id,
             routeName,
             lat: v.position.latitude,
             lng: v.position.longitude,
@@ -108,29 +110,24 @@
     }
   }
 
-  // Returns true if a bus should be visible given current filters
   function shouldShow(normalizedRoute) {
     const term = normalize(searchTerm);
     const selected = normalize(selectedRoute);
-
     const matchesSearch = !searchTerm || normalizedRoute.startsWith(term);
     const matchesSelected = !selectedRoute || normalizedRoute === selected;
     const matchesFavourites =
       !favouritesMode || favourites.includes(normalizedRoute);
-
     return matchesSearch && matchesSelected && matchesFavourites;
   }
 
-  // Viewport culling — only add markers that are in or near current bounds
   function isNearViewport(lat, lng) {
-    const bounds = map.getBounds().pad(0.3); // 30% padding so markers don't pop in aggressively
+    const bounds = map.getBounds().pad(0.3);
     return bounds.contains([lat, lng]);
   }
 
   function applySearch() {
     if (!map || !clusterGroup) return;
 
-    const term = normalize(searchTerm);
     const visibleMarkers = [];
 
     clusterGroup.clearLayers();
@@ -144,7 +141,6 @@
         visibleMarkers.push(bus.marker);
       }
 
-      // Update selected style
       const el = bus.marker.getElement?.();
       if (el) {
         if (selectedRoute && bus.normalizedRoute === normalize(selectedRoute)) {
@@ -169,7 +165,6 @@
       const newBuses = await fetchBuses(routeNames);
 
       if (busData.length === 0) {
-        // First load — create all markers
         buses = newBuses;
 
         newBuses.forEach((bus) => {
@@ -193,9 +188,14 @@
 
         applySearch();
       } else {
-        // Subsequent refreshes — update positions silently
-        newBuses.forEach((newBus, i) => {
-          const entry = busData[i];
+        // Match by vehicle ID so order doesn't matter
+        const existingById = {};
+        busData.forEach((entry) => {
+          existingById[entry.id] = entry;
+        });
+
+        newBuses.forEach((newBus) => {
+          const entry = existingById[newBus.id];
           if (!entry) return;
 
           entry.lat = newBus.lat;
@@ -208,7 +208,6 @@
         });
 
         buses = newBuses;
-        // Re-apply viewport culling after position update
         applySearch();
       }
     } catch (err) {
@@ -234,9 +233,9 @@
       boxZoom: true,
       keyboard: true,
       zoomSnap: 0.5,
-      maxZoom: 19,
       zoomDelta: 1,
-      tap: false, // improves iOS touch performance
+      tap: false,
+      maxZoom: 19,
       maxBounds: [
         [53.14, -6.63],
         [53.46, -6.0],
@@ -251,9 +250,8 @@
 
     setTimeout(() => map.invalidateSize(), 0);
 
-    // Cluster group — disables clustering at high zoom so individual buses show
     clusterGroup = L.markerClusterGroup({
-      disableClusteringAtZoom: 13,
+      disableClusteringAtZoom: 14,
       maxClusterRadius: 40,
       spiderfyOnMaxZoom: false,
       showCoverageOnHover: false,
@@ -270,7 +268,6 @@
 
     map.addLayer(clusterGroup);
 
-    // Re-apply viewport culling on move/zoom
     map.on("moveend zoomend", () => {
       applySearch();
     });
