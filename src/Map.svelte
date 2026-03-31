@@ -3,12 +3,21 @@
   import L from "leaflet";
   import protobuf from "protobufjs";
 
+  export let searchTerm = "";
+
   let map;
+  let mapContainer;
+
   const markers = [];
   let locationMarker = null;
 
   let isFetching = false;
   let FeedMessage;
+  let buses = [];
+
+  function normalize(str) {
+    return (str || "").replace(/\s/g, "").toLowerCase();
+  }
 
   async function fetchRouteNames() {
     try {
@@ -16,13 +25,13 @@
         "https://bus-times.ciaranjmcgann.workers.dev/routes"
       );
       const routes = await res.json();
+
       const lookup = {};
       for (const r of routes) {
         if (r.route_id && r.route_short_name) {
           lookup[r.route_id.trim()] = r.route_short_name.trim();
         }
       }
-      console.log("Loaded routes:", Object.keys(lookup).length);
       return lookup;
     } catch (e) {
       console.warn("Could not load route names", e);
@@ -31,7 +40,7 @@
   }
 
   function makeBusIcon(bearing, baseUrl) {
-    const rotation = bearing - 0 || 0; // change this to -90 when movement works
+    const rotation = bearing || 0;
     return L.divIcon({
       className: "",
       html: `
@@ -55,13 +64,7 @@
         "https://bus-times.ciaranjmcgann.workers.dev/vehicles"
       );
 
-      if (!res.ok) {
-        console.warn("API error:", res.status);
-        if (res.status === 429) {
-          console.warn("Rate limited — skipping refresh");
-        }
-        return [];
-      }
+      if (!res.ok) return [];
 
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
@@ -70,18 +73,8 @@
         .map((e) => e.vehicle)
         .filter((v) => v && v.position)
         .map((v) => {
-          console.log("bearing:", v.position.bearing);
-
           const routeId = v.trip?.routeId || "";
-
-          let routeName = routeNames[routeId];
-          if (!routeName) {
-            routeName = Object.values(routeNames).find((name) =>
-              routeId.includes(name)
-            );
-          }
-          routeName = routeName || "N/A";
-
+          const routeName = routeNames[routeId] || "N/A";
           return {
             routeName,
             lat: v.position.latitude,
@@ -95,30 +88,62 @@
     }
   }
 
+  function applySearch() {
+    const term = normalize(searchTerm);
+    const visibleMarkers = [];
+
+    markers.forEach((marker) => {
+      const route = marker._busRoute;
+      const matches = !searchTerm ? true : route.startsWith(term);
+
+      if (matches) {
+        marker.setOpacity(1);
+        marker.getTooltip()?.getElement()?.style.setProperty("display", "");
+        visibleMarkers.push(marker);
+      } else {
+        marker.setOpacity(0);
+        marker.getTooltip()?.getElement()?.style.setProperty("display", "none");
+      }
+    });
+
+    if (searchTerm && visibleMarkers.length > 0) {
+      const group = L.featureGroup(visibleMarkers);
+      map.fitBounds(group.getBounds().pad(0.1));
+    }
+  }
+
   async function refreshBuses(routeNames, baseUrl) {
     if (isFetching) return;
     isFetching = true;
 
     try {
-      markers.forEach((m) => m.remove());
-      markers.length = 0;
+      const newBuses = await fetchBuses(routeNames);
 
-      const buses = await fetchBuses(routeNames);
-
-      buses.forEach((bus) => {
-        const icon = makeBusIcon(bus.bearing, baseUrl);
-
-        const marker = L.marker([bus.lat, bus.lng], { icon })
-          .addTo(map)
-          .bindTooltip(` ${bus.routeName}`, {
-            permanent: true,
-            direction: "top",
-            className: "bus-label",
-          })
-          .bindPopup(`Route ${bus.routeName}`);
-
-        markers.push(marker);
-      });
+      if (markers.length === 0) {
+        buses = newBuses;
+        newBuses.forEach((bus) => {
+          const icon = makeBusIcon(bus.bearing, baseUrl);
+          const marker = L.marker([bus.lat, bus.lng], { icon })
+            .addTo(map)
+            .bindTooltip(` ${bus.routeName}`, {
+              permanent: true,
+              direction: "top",
+              className: "bus-label",
+            })
+            .bindPopup(`Route ${bus.routeName}`);
+          marker._busRoute = normalize(bus.routeName);
+          markers.push(marker);
+        });
+        applySearch();
+      } else {
+        newBuses.forEach((newBus, i) => {
+          const marker = markers[i];
+          if (!marker) return;
+          marker.setLatLng([newBus.lat, newBus.lng]);
+          marker.setIcon(makeBusIcon(newBus.bearing, baseUrl));
+        });
+        buses = newBuses;
+      }
     } catch (err) {
       console.error("Failed to refresh buses:", err);
     } finally {
@@ -133,15 +158,7 @@
   }
 
   onMount(async () => {
-    map = L.map("map", {
-      zoomControl: false,
-      dragging: true,
-      touchZoom: true,
-      doubleClickZoom: true,
-      scrollWheelZoom: false,
-    }).setView([53.35, -6.26], 12);
-
-    L.control.zoom({ position: "bottomright" }).addTo(map);
+    map = L.map(mapContainer).setView([53.35, -6.26], 12);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
@@ -149,13 +166,16 @@
     }).addTo(map);
 
     const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
-    const root = await protobuf.load(protoUrl);
-    FeedMessage = root.lookupType("transit_realtime.FeedMessage");
-
     const baseUrl = import.meta.env.BASE_URL;
 
-    const routeNames = await fetchRouteNames();
-    await refreshBuses(routeNames, baseUrl);
+    const [root, routeNames] = await Promise.all([
+      protobuf.load(protoUrl),
+      fetchRouteNames(),
+    ]);
+
+    FeedMessage = root.lookupType("transit_realtime.FeedMessage");
+
+    refreshBuses(routeNames, baseUrl);
     setInterval(() => refreshBuses(routeNames, baseUrl), 45000);
 
     if (navigator.geolocation) {
@@ -178,16 +198,27 @@
             map.setView([latitude, longitude], 15);
           }
         },
-        (err) => {
-          console.warn("Geolocation error:", err);
-        },
+        (err) => console.warn("Geolocation error:", err),
         { enableHighAccuracy: true }
       );
     }
   });
+
+  let searchDebounce;
+  $: {
+    searchTerm;
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      if (map && markers.length) applySearch();
+    }, 300);
+  }
 </script>
 
-<div id="map"></div>
+<div bind:this={mapContainer} class="map"></div>
+
+{#if !buses.length}
+  <div class="loading">Loading buses...</div>
+{/if}
 
 <button class="locate-btn" on:click={locateMe}>📍</button>
 
@@ -199,32 +230,9 @@
     overflow: hidden;
   }
 
-  #map {
-    height: 100vh;
-    width: 100vw;
-    touch-action: pan-x pan-y;
-  }
-
-  :global(.leaflet-control-zoom a) {
-    width: 44px;
-    height: 44px;
-    line-height: 44px;
-    font-size: 20px;
-  }
-
-  :global(.leaflet-control-zoom) {
-    margin-bottom: 20px;
-    margin-right: 10px;
-  }
-
-  :global(.leaflet-tooltip.bus-label) {
-    background: #1a73e8 !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 4px;
-    font-weight: bold;
-    font-size: 11px;
-    padding: 2px 5px;
+  .map {
+    width: 100%;
+    height: 100%;
   }
 
   :global(.bus-marker-wrap) {
@@ -240,6 +248,16 @@
     height: 40px;
     object-fit: contain;
     transform-origin: center center;
+  }
+
+  :global(.leaflet-tooltip.bus-label) {
+    background: #1a73e8 !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 4px;
+    font-weight: bold;
+    font-size: 11px;
+    padding: 2px 5px;
   }
 
   .locate-btn {
@@ -260,7 +278,16 @@
     justify-content: center;
   }
 
-  .locate-btn:active {
-    background: #f0f0f0;
+  .loading {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    background: white;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
   }
 </style>
