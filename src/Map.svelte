@@ -476,4 +476,12 @@
       transform: rotate(360deg);
     }
   }
+
+  .leaflet-pane,
+  .leaflet-tile,
+  .leaflet-marker-icon,
+  .leaflet-marker-shadow {
+    will-change: transform;
+    transform: translateZ(0);
+  }
 </style>

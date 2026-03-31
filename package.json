@@ -14,7 +14,8 @@
     "leaflet": "^1.9.4",
     "leaflet.markercluster": "^1.5.3",
     "protobufjs": "^8.0.0",
-    "svelte": "^4.0.0"
+    "svelte": "^4.0.0",
+    "svelte-spa-router": "^5.0.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^2.0.0",
