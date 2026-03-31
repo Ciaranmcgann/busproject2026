@@ -17,7 +17,6 @@
 
   let selectedRoute = "";
 
-  // ✅ Dublin bounds
   const DUBLIN_BOUNDS = {
     minLat: 53.14,
     maxLat: 53.46,
@@ -88,24 +87,21 @@
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
 
-      return (
-        feed.entity
-          .map((e) => e.vehicle)
-          .filter((v) => v && v.position)
-          .map((v) => {
-            const routeId = v.trip?.routeId || "";
-            const routeName = routeNames[routeId] || "N/A";
+      return feed.entity
+        .map((e) => e.vehicle)
+        .filter((v) => v && v.position)
+        .map((v) => {
+          const routeId = v.trip?.routeId || "";
+          const routeName = routeNames[routeId] || "N/A";
 
-            return {
-              routeName,
-              lat: v.position.latitude,
-              lng: v.position.longitude,
-              bearing: v.position.bearing || 0,
-            };
-          })
-          // ✅ Dublin filter
-          .filter((bus) => isInDublin(bus.lat, bus.lng))
-      );
+          return {
+            routeName,
+            lat: v.position.latitude,
+            lng: v.position.longitude,
+            bearing: v.position.bearing || 0,
+          };
+        })
+        .filter((bus) => isInDublin(bus.lat, bus.lng));
     } catch (err) {
       console.error("Fetch buses failed:", err);
       return [];
@@ -196,7 +192,12 @@
           if (!marker) return;
 
           marker.setLatLng([newBus.lat, newBus.lng]);
-          marker.setIcon(makeBusIcon(newBus.bearing, baseUrl));
+
+          // Update rotation without recreating icon (performance fix)
+          const img = marker.getElement()?.querySelector("img");
+          if (img) {
+            img.style.transform = `rotate(${newBus.bearing || 0}deg)`;
+          }
         });
 
         buses = newBuses;
@@ -223,6 +224,8 @@
       doubleClickZoom: true,
       boxZoom: true,
       keyboard: true,
+      zoomSnap: 0.25,
+      zoomDelta: 0.5,
       maxBounds: [
         [53.14, -6.63],
         [53.46, -6.0],
@@ -230,7 +233,6 @@
       maxBoundsViscosity: 1.0,
     });
 
-    // ✅ Fit map to Dublin on load
     map.fitBounds([
       [53.14, -6.63],
       [53.46, -6.0],
@@ -248,6 +250,8 @@
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: "&copy; OpenStreetMap contributors",
+      updateWhenIdle: false,
+      updateWhenZooming: true,
     }).addTo(map);
 
     const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
@@ -373,7 +377,7 @@
 
   .locate-btn {
     position: fixed;
-    top: 10px;
+    top: 70px;
     right: 10px;
     z-index: 1000;
 
