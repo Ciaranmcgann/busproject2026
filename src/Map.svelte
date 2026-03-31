@@ -328,6 +328,9 @@
 </button>
 
 <style>
+  input {
+    font-size: 16px;
+  }
   :global(html, body) {
     margin: 0;
     padding: 0;
