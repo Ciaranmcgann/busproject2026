@@ -15,6 +15,25 @@
   let FeedMessage;
   let buses = [];
 
+  let selectedRoute = "";
+
+  // ✅ Dublin bounds
+  const DUBLIN_BOUNDS = {
+    minLat: 53.14,
+    maxLat: 53.46,
+    minLng: -6.63,
+    maxLng: -6.0,
+  };
+
+  function isInDublin(lat, lng) {
+    return (
+      lat >= DUBLIN_BOUNDS.minLat &&
+      lat <= DUBLIN_BOUNDS.maxLat &&
+      lng >= DUBLIN_BOUNDS.minLng &&
+      lng <= DUBLIN_BOUNDS.maxLng
+    );
+  }
+
   function normalize(str) {
     return (str || "").replace(/\s/g, "").toLowerCase();
   }
@@ -69,44 +88,73 @@
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
 
-      return feed.entity
-        .map((e) => e.vehicle)
-        .filter((v) => v && v.position)
-        .map((v) => {
-          const routeId = v.trip?.routeId || "";
-          const routeName = routeNames[routeId] || "N/A";
-          return {
-            routeName,
-            lat: v.position.latitude,
-            lng: v.position.longitude,
-            bearing: v.position.bearing || 0,
-          };
-        });
+      return (
+        feed.entity
+          .map((e) => e.vehicle)
+          .filter((v) => v && v.position)
+          .map((v) => {
+            const routeId = v.trip?.routeId || "";
+            const routeName = routeNames[routeId] || "N/A";
+
+            return {
+              routeName,
+              lat: v.position.latitude,
+              lng: v.position.longitude,
+              bearing: v.position.bearing || 0,
+            };
+          })
+          // ✅ Dublin filter
+          .filter((bus) => isInDublin(bus.lat, bus.lng))
+      );
     } catch (err) {
       console.error("Fetch buses failed:", err);
       return [];
     }
   }
 
+  function updateMarkerStyles() {
+    const selected = normalize(selectedRoute);
+
+    markers.forEach((marker) => {
+      const route = marker._busRoute;
+      const el = marker.getElement();
+
+      if (!el) return;
+
+      if (selectedRoute && route === selected) {
+        el.classList.add("selected-bus");
+      } else {
+        el.classList.remove("selected-bus");
+      }
+    });
+  }
+
   function applySearch() {
     const term = normalize(searchTerm);
+    const selected = normalize(selectedRoute);
+
     const visibleMarkers = [];
 
     markers.forEach((marker) => {
       const route = marker._busRoute;
-      const matches = !searchTerm ? true : route.startsWith(term);
 
-      if (matches) {
+      const matchesSearch = !searchTerm || route.startsWith(term);
+      const matchesSelected = !selectedRoute || route === selected;
+
+      const isVisible = matchesSearch && matchesSelected;
+
+      if (isVisible) {
+        if (!map.hasLayer(marker)) marker.addTo(map);
         marker.setOpacity(1);
-        marker.getTooltip()?.getElement()?.style.setProperty("display", "");
         visibleMarkers.push(marker);
       } else {
-        marker.setOpacity(0);
-        marker.getTooltip()?.getElement()?.style.setProperty("display", "none");
+        if (map.hasLayer(marker)) map.removeLayer(marker);
       }
     });
 
-    if (searchTerm && visibleMarkers.length > 0) {
+    updateMarkerStyles();
+
+    if ((searchTerm || selectedRoute) && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
       map.fitBounds(group.getBounds().pad(0.1));
     }
@@ -121,27 +169,36 @@
 
       if (markers.length === 0) {
         buses = newBuses;
+
         newBuses.forEach((bus) => {
           const icon = makeBusIcon(bus.bearing, baseUrl);
+
           const marker = L.marker([bus.lat, bus.lng], { icon })
             .addTo(map)
-            .bindTooltip(` ${bus.routeName}`, {
+            .bindTooltip(bus.routeName, {
               permanent: true,
               direction: "top",
               className: "bus-label",
             })
-            .bindPopup(`Route ${bus.routeName}`);
+            .on("click", () => {
+              selectedRoute = marker._busRoute;
+              applySearch();
+            });
+
           marker._busRoute = normalize(bus.routeName);
           markers.push(marker);
         });
+
         applySearch();
       } else {
         newBuses.forEach((newBus, i) => {
           const marker = markers[i];
           if (!marker) return;
+
           marker.setLatLng([newBus.lat, newBus.lng]);
           marker.setIcon(makeBusIcon(newBus.bearing, baseUrl));
         });
+
         buses = newBuses;
       }
     } catch (err) {
@@ -158,7 +215,35 @@
   }
 
   onMount(async () => {
-    map = L.map(mapContainer).setView([53.35, -6.26], 12);
+    map = L.map(mapContainer, {
+      zoomControl: true,
+      scrollWheelZoom: true,
+      dragging: true,
+      touchZoom: true,
+      doubleClickZoom: true,
+      boxZoom: true,
+      keyboard: true,
+      maxBounds: [
+        [53.14, -6.63],
+        [53.46, -6.0],
+      ],
+      maxBoundsViscosity: 1.0,
+    });
+
+    // ✅ Fit map to Dublin on load
+    map.fitBounds([
+      [53.14, -6.63],
+      [53.46, -6.0],
+    ]);
+
+    setTimeout(() => {
+      map.invalidateSize();
+    }, 0);
+
+    map.on("click", () => {
+      selectedRoute = "";
+      applySearch();
+    });
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
@@ -182,6 +267,7 @@
       navigator.geolocation.watchPosition(
         (pos) => {
           const { latitude, longitude } = pos.coords;
+
           if (locationMarker) {
             locationMarker.setLatLng([latitude, longitude]);
           } else {
@@ -195,6 +281,7 @@
             })
               .addTo(map)
               .bindPopup("You are here");
+
             map.setView([latitude, longitude], 15);
           }
         },
@@ -217,10 +304,28 @@
 <div bind:this={mapContainer} class="map"></div>
 
 {#if !buses.length}
-  <div class="loading">Loading buses...</div>
+  <div class="loading">
+    <img src="{import.meta.env.BASE_URL}bus.png" class="spinner" />
+    <span>Loading buses...</span>
+  </div>
 {/if}
 
-<button class="locate-btn" on:click={locateMe}>📍</button>
+<button class="locate-btn" on:click={locateMe}>
+  <svg
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+  >
+    <circle cx="12" cy="12" r="8"></circle>
+    <line x1="12" x2="12" y1="2" y2="6"></line>
+    <line x1="12" x2="12" y1="18" y2="22"></line>
+    <line x1="2" y1="12" x2="6" y2="12"></line>
+    <line x1="18" y1="12" x2="22" y2="12"></line>
+  </svg>
+</button>
 
 <style>
   :global(html, body) {
@@ -247,7 +352,6 @@
     width: 40px;
     height: 40px;
     object-fit: contain;
-    transform-origin: center center;
   }
 
   :global(.leaflet-tooltip.bus-label) {
@@ -260,34 +364,68 @@
     padding: 2px 5px;
   }
 
+  :global(.selected-bus) {
+    transform: scale(1.4);
+    z-index: 1000;
+    filter: drop-shadow(0 0 6px rgba(26, 115, 232, 0.9));
+  }
+
   .locate-btn {
     position: fixed;
-    bottom: 100px;
-    right: 16px;
+    top: 10px;
+    right: 10px;
     z-index: 1000;
-    width: 44px;
-    height: 44px;
-    border-radius: 8px;
+
+    width: 50px;
+    height: 50px;
+
     border: none;
+    border-radius: 4px;
     background: white;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
-    font-size: 22px;
-    cursor: pointer;
+    color: #333;
+
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
+
     display: flex;
     align-items: center;
     justify-content: center;
+
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .locate-btn svg {
+    display: block;
   }
 
   .loading {
     position: fixed;
-    top: 16px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 1000;
-    background: white;
-    padding: 6px 14px;
-    border-radius: 20px;
-    font-size: 13px;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    inset: 0;
+    z-index: 2000;
+
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(4px);
+
+    gap: 10px;
+  }
+
+  .spinner {
+    width: 48px;
+    height: 48px;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

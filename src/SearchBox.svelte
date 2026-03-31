@@ -78,7 +78,7 @@
   }
 
   input {
-    width: 100%;
+    width: 80%;
     padding: 10px 14px;
     border-radius: 8px;
     border: 1px solid #ccc;
