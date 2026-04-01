@@ -11,7 +11,7 @@
   let map;
   let mapContainer;
 
-  let busData = [];
+  let busData = new Map();
   let clusterGroup;
   let locationMarker = null;
 
@@ -19,6 +19,13 @@
   let FeedMessage;
   let buses = [];
   let selectedRoute = "";
+
+  let allStops = [];
+  let stopLayerGroup = null;
+
+  let lastUpdated = null;
+  let timeSinceUpdate = "";
+  let timerInterval;
 
   const DUBLIN_BOUNDS = {
     minLat: 53.14,
@@ -40,6 +47,17 @@
     return (str || "").replace(/\s/g, "").toLowerCase();
   }
 
+  function updateTimer() {
+    if (!lastUpdated) return;
+    const secs = Math.floor((Date.now() - lastUpdated) / 1000);
+    if (secs < 60) {
+      timeSinceUpdate = `Updated ${secs}s ago`;
+    } else {
+      const mins = Math.floor(secs / 60);
+      timeSinceUpdate = `Updated ${mins}m ago`;
+    }
+  }
+
   async function fetchRouteNames() {
     try {
       const res = await fetch(
@@ -57,6 +75,129 @@
       console.warn("Could not load route names", e);
       return {};
     }
+  }
+
+  async function fetchStops() {
+    try {
+      const res = await fetch(
+        "https://bus-times.ciaranjmcgann.workers.dev/static/stops.json"
+      );
+      const data = await res.json();
+      allStops = data.filter(
+        (s) =>
+          s.stop_lat &&
+          s.stop_lon &&
+          isInDublin(parseFloat(s.stop_lat), parseFloat(s.stop_lon))
+      );
+    } catch (e) {
+      console.warn("Could not load stops", e);
+    }
+  }
+
+  function makeStopIcon() {
+    return L.divIcon({
+      className: "",
+      html: `<div class="stop-marker"></div>`,
+      iconSize: [12, 12],
+      iconAnchor: [6, 6],
+      popupAnchor: [0, -8],
+    });
+  }
+
+  async function showStopPopup(marker, stop) {
+    marker
+      .bindPopup(
+        `
+      <div class="stop-popup">
+        <div class="stop-popup-name">${stop.stop_name}</div>
+        <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+        <div class="stop-popup-empty">Loading arrivals...</div>
+      </div>
+    `,
+        { maxWidth: 260 }
+      )
+      .openPopup();
+
+    try {
+      const res = await fetch(
+        `https://bus-times.ciaranjmcgann.workers.dev/stop-times/${stop.stop_id}`
+      );
+      const times = await res.json();
+
+      const now = new Date();
+      const nowMins = now.getHours() * 60 + now.getMinutes();
+
+      const upcoming = times
+        .filter((t) => {
+          const [h, m] = t.arrival_time.split(":").map(Number);
+          return h * 60 + m >= nowMins;
+        })
+        .slice(0, 8);
+
+      if (upcoming.length === 0) {
+        marker.setPopupContent(`
+          <div class="stop-popup">
+            <div class="stop-popup-name">${stop.stop_name}</div>
+            <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+            <div class="stop-popup-empty">No upcoming arrivals</div>
+          </div>
+        `);
+        return;
+      }
+
+      const rows = upcoming
+        .map((t) => {
+          const [h, m] = t.arrival_time.split(":");
+          return `
+          <div class="stop-popup-row">
+            <span class="stop-popup-time">${h}:${m}</span>
+            <span class="stop-popup-trip">${t.trip_id}</span>
+          </div>
+        `;
+        })
+        .join("");
+
+      marker.setPopupContent(`
+        <div class="stop-popup">
+          <div class="stop-popup-name">${stop.stop_name}</div>
+          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+          ${rows}
+        </div>
+      `);
+    } catch (err) {
+      marker.setPopupContent(`
+        <div class="stop-popup">
+          <div class="stop-popup-name">${stop.stop_name}</div>
+          <div class="stop-popup-empty">Failed to load arrivals</div>
+        </div>
+      `);
+    }
+  }
+
+  function showStopsForRoute(normalizedRoute) {
+    if (stopLayerGroup) {
+      stopLayerGroup.clearLayers();
+    } else {
+      stopLayerGroup = L.layerGroup().addTo(map);
+    }
+
+    if (!normalizedRoute) return;
+
+    const bounds = map.getBounds().pad(0.1);
+
+    allStops.forEach((stop) => {
+      const lat = parseFloat(stop.stop_lat);
+      const lng = parseFloat(stop.stop_lon);
+      if (!bounds.contains([lat, lng])) return;
+
+      const marker = L.marker([lat, lng], { icon: makeStopIcon() });
+      marker.on("click", (e) => {
+        L.DomEvent.stopPropagation(e);
+        showStopPopup(marker, stop);
+      });
+
+      stopLayerGroup.addLayer(marker);
+    });
   }
 
   function makeBusIcon(bearing) {
@@ -87,10 +228,7 @@
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
       return feed.entity
-        .map((e) => ({
-          id: e.id,
-          vehicle: e.vehicle,
-        }))
+        .map((e) => ({ id: e.id, vehicle: e.vehicle }))
         .filter(({ vehicle: v }) => v && v.position)
         .map(({ id, vehicle: v }) => {
           const routeId = v.trip?.routeId || "";
@@ -129,7 +267,6 @@
     if (!map || !clusterGroup) return;
 
     const visibleMarkers = [];
-
     clusterGroup.clearLayers();
 
     busData.forEach((bus) => {
@@ -151,65 +288,73 @@
       }
     });
 
+    showStopsForRoute(normalize(selectedRoute));
+
     if (searchTerm && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
       map.fitBounds(group.getBounds().pad(0.05));
     }
   }
 
-  async function refreshBuses(routeNames) {
+  function createMarker(bus, normalizedRoute) {
+    return L.marker([bus.lat, bus.lng], { icon: makeBusIcon(bus.bearing) })
+      .bindTooltip(bus.routeName, {
+        permanent: true,
+        direction: "top",
+        className: "bus-label",
+      })
+      .on("click", (e) => {
+        L.DomEvent.stopPropagation(e);
+        selectedRoute = normalizedRoute;
+        applySearch();
+      });
+  }
+
+  async function refreshBuses(routeNames, isBackground = false) {
     if (isFetching) return;
     isFetching = true;
 
     try {
       const newBuses = await fetchBuses(routeNames);
+      const incomingIds = new Set(newBuses.map((b) => b.id));
 
-      if (busData.length === 0) {
-        buses = newBuses;
+      if (!isBackground) {
+        // Full reload — clear cluster completely first
+        clusterGroup.clearLayers();
+      }
 
-        newBuses.forEach((bus) => {
-          const normalizedRoute = normalize(bus.routeName);
-          const marker = L.marker([bus.lat, bus.lng], {
-            icon: makeBusIcon(bus.bearing),
-          })
-            .bindTooltip(bus.routeName, {
-              permanent: true,
-              direction: "top",
-              className: "bus-label",
-            })
-            .on("click", (e) => {
-              L.DomEvent.stopPropagation(e);
-              selectedRoute = normalizedRoute;
-              applySearch();
-            });
+      // Remove buses no longer in the feed
+      busData.forEach((entry, id) => {
+        if (!incomingIds.has(id)) {
+          clusterGroup.removeLayer(entry.marker);
+          busData.delete(id);
+        }
+      });
 
-          busData.push({ ...bus, normalizedRoute, marker });
-        });
+      // Update existing or add new
+      newBuses.forEach((newBus) => {
+        const normalizedRoute = normalize(newBus.routeName);
 
-        applySearch();
-      } else {
-        // Match by vehicle ID so order doesn't matter
-        const existingById = {};
-        busData.forEach((entry) => {
-          existingById[entry.id] = entry;
-        });
-
-        newBuses.forEach((newBus) => {
-          const entry = existingById[newBus.id];
-          if (!entry) return;
-
+        if (busData.has(newBus.id)) {
+          const entry = busData.get(newBus.id);
           entry.lat = newBus.lat;
           entry.lng = newBus.lng;
           entry.bearing = newBus.bearing;
-
+          entry.normalizedRoute = normalizedRoute;
           entry.marker.setLatLng([newBus.lat, newBus.lng]);
           const img = entry.marker.getElement?.()?.querySelector("img");
           if (img) img.style.transform = `rotate(${newBus.bearing || 0}deg)`;
-        });
+        } else {
+          // New bus — create marker but don't add to cluster yet
+          const marker = createMarker(newBus, normalizedRoute);
+          busData.set(newBus.id, { ...newBus, normalizedRoute, marker });
+        }
+      });
 
-        buses = newBuses;
-        applySearch();
-      }
+      buses = newBuses;
+      lastUpdated = Date.now();
+      updateTimer();
+      applySearch();
     } catch (err) {
       console.error("Failed to refresh buses:", err);
     } finally {
@@ -221,6 +366,10 @@
     if (locationMarker) {
       map.setView(locationMarker.getLatLng(), 15);
     }
+  }
+
+  function refreshPage() {
+    window.location.reload();
   }
 
   onMount(async () => {
@@ -247,8 +396,9 @@
       [53.14, -6.63],
       [53.46, -6.0],
     ]);
-
     setTimeout(() => map.invalidateSize(), 0);
+
+    timerInterval = setInterval(updateTimer, 1000);
 
     clusterGroup = L.markerClusterGroup({
       disableClusteringAtZoom: 14,
@@ -268,10 +418,7 @@
 
     map.addLayer(clusterGroup);
 
-    map.on("moveend zoomend", () => {
-      applySearch();
-    });
-
+    map.on("moveend zoomend", () => applySearch());
     map.on("click", () => {
       selectedRoute = "";
       applySearch();
@@ -289,12 +436,16 @@
     const [root, routeNames] = await Promise.all([
       protobuf.load(protoUrl),
       fetchRouteNames(),
+      fetchStops(),
     ]);
 
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
 
-    refreshBuses(routeNames);
-    setInterval(() => refreshBuses(routeNames), 45000);
+    // First load — full refresh
+    refreshBuses(routeNames, false);
+
+    // Background — silent position updates only
+    setInterval(() => refreshBuses(routeNames, true), 45000);
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
@@ -329,7 +480,7 @@
     favouritesMode;
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(() => {
-      if (map && busData.length) applySearch();
+      if (map && busData.size) applySearch();
     }, 300);
   }
 </script>
@@ -363,6 +514,27 @@
     <line x1="18" y1="12" x2="22" y2="12"></line>
   </svg>
 </button>
+
+<button class="refresh-btn" on:click={refreshPage}>
+  <svg
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+  >
+    <polyline points="23 4 23 10 17 10"></polyline>
+    <polyline points="1 20 1 14 7 14"></polyline>
+    <path
+      d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
+    ></path>
+  </svg>
+</button>
+
+{#if timeSinceUpdate}
+  <div class="update-pill">{timeSinceUpdate}</div>
+{/if}
 
 <style>
   :global(html, body) {
@@ -423,9 +595,61 @@
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   }
 
-  .locate-btn {
+  :global(.stop-marker) {
+    width: 12px;
+    height: 12px;
+    background: white;
+    border: 2px solid #1a73e8;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+
+  :global(.stop-popup) {
+    font-family: system-ui, sans-serif;
+    min-width: 180px;
+  }
+
+  :global(.stop-popup-name) {
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 2px;
+  }
+
+  :global(.stop-popup-code) {
+    font-size: 11px;
+    color: #888;
+    margin-bottom: 8px;
+  }
+
+  :global(.stop-popup-row) {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+    border-top: 1px solid #f0f0f0;
+    font-size: 13px;
+  }
+
+  :global(.stop-popup-time) {
+    font-weight: 700;
+    color: #1a73e8;
+    min-width: 42px;
+  }
+
+  :global(.stop-popup-trip) {
+    color: #555;
+    font-size: 12px;
+  }
+
+  :global(.stop-popup-empty) {
+    font-size: 13px;
+    color: #999;
+    padding: 4px 0;
+  }
+
+  .locate-btn,
+  .refresh-btn {
     position: fixed;
-    top: 70px;
     right: 10px;
     z-index: 1000;
     width: 50px;
@@ -442,8 +666,32 @@
     padding: 0;
   }
 
-  .locate-btn svg {
+  .locate-btn {
+    top: 70px;
+  }
+
+  .refresh-btn {
+    top: 130px;
+  }
+
+  .locate-btn svg,
+  .refresh-btn svg {
     display: block;
+  }
+
+  .update-pill {
+    position: fixed;
+    bottom: 66px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    background: rgba(0, 0, 0, 0.6);
+    color: white;
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    pointer-events: none;
+    white-space: nowrap;
   }
 
   .loading {

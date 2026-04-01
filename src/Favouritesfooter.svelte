@@ -158,10 +158,10 @@
     display: flex;
     align-items: center;
     padding: 0 12px;
+    padding-bottom: env(safe-area-inset-bottom);
     gap: 8px;
     box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
   }
-
   .fav-open-btn {
     flex: 1;
     display: flex;
