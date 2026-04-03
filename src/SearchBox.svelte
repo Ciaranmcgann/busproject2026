@@ -88,7 +88,7 @@
 <div class="search-container">
   <input
     type="text"
-    placeholder="Search bus route (e.g. 15A)"
+    placeholder="Search bus route"
     bind:value
     on:input={handleInput}
     on:keydown={handleKeydown}

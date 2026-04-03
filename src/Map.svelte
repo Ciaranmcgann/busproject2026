@@ -30,7 +30,10 @@
 
   let shapePoints = new Map();
   let tripShapeMap = new Map();
+  let tripStopSequence = new Map(); // trip_id -> [{stop_id, seq}] sorted
+  let stopLatLng = new Map(); // stop_id -> {lat, lng}
   let shouldAutoFit = false;
+  let selectedTripId = "";
 
   const API = "https://bus-times.ciaranjmcgann.workers.dev";
 
@@ -40,11 +43,6 @@
     minLng: -6.63,
     maxLng: -6.0,
   };
-
-  function onSearch() {
-    shouldAutoFit = true;
-    applySearch();
-  }
 
   function isInDublin(lat, lng) {
     return (
@@ -81,6 +79,39 @@
     return (toDeg(Math.atan2(y, x)) + 360) % 360;
   }
 
+  // Find bearing from trip's stop sequence —
+  // finds the two consecutive stops the bus is between and returns heading
+  function getBearingFromStops(tripId, busLat, busLng) {
+    const stops = tripStopSequence.get(tripId);
+    if (!stops || stops.length < 2) return null;
+
+    let nearestIdx = 0;
+    let nearestDist = Infinity;
+
+    for (let i = 0; i < stops.length; i++) {
+      const s = stopLatLng.get(stops[i].stop_id);
+      if (!s) continue;
+      const dLat = s.lat - busLat;
+      const dLng = s.lng - busLng;
+      const dist = dLat * dLat + dLng * dLng;
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestIdx = i;
+      }
+    }
+
+    // Use nearest stop -> next stop as direction
+    const nextIdx = Math.min(nearestIdx + 1, stops.length - 1);
+    const from = stopLatLng.get(stops[nearestIdx].stop_id);
+    const to = stopLatLng.get(stops[nextIdx].stop_id);
+
+    if (!from || !to) return null;
+    if (from.lat === to.lat && from.lng === to.lng) return null;
+
+    return calculateBearing(from.lat, from.lng, to.lat, to.lng);
+  }
+
+  // Fallback to shape-based bearing if stop-based fails
   function getBearingFromShape(shapeId, busLat, busLng) {
     const points = shapePoints.get(shapeId);
     if (!points || points.length < 2) return null;
@@ -103,39 +134,27 @@
   }
 
   function resolveBearing(newBus) {
+    // Try stop-sequence bearing first (most accurate for direction)
+    const stopBearing = getBearingFromStops(
+      newBus.tripId,
+      newBus.lat,
+      newBus.lng
+    );
+    if (stopBearing !== null) return stopBearing;
+
+    // Fall back to shape-based bearing
     const shapeId = tripShapeMap.get(newBus.tripId);
     if (shapeId) {
-      const b = getBearingFromShape(shapeId, newBus.lat, newBus.lng);
-      if (b !== null) return b;
+      const shapeBearing = getBearingFromShape(shapeId, newBus.lat, newBus.lng);
+      if (shapeBearing !== null) return shapeBearing;
     }
+
     return 0;
-  }
-
-  $: filteredStops =
-    selectedRoute && routeStopIds.size
-      ? allStops.filter((stop) =>
-          routeStopIds.get(selectedRoute)?.has(stop.stop_id)
-        )
-      : allStops;
-
-  function buildRouteStops(routeStops) {
-    const map = new Map();
-
-    routeStops.forEach(({ route_id, stop_id }) => {
-      if (!map.has(route_id)) {
-        map.set(route_id, new Set());
-      }
-      map.get(route_id).add(stop_id);
-    });
-
-    routeStopIds = map;
   }
 
   async function fetchRouteNames() {
     try {
-      const res = await fetch(
-        "https://bus-times.ciaranjmcgann.workers.dev/routes"
-      );
+      const res = await fetch(`${API}/routes`);
       const routes = await res.json();
       const lookup = {};
       for (const r of routes) {
@@ -152,9 +171,8 @@
 
   async function fetchStops() {
     try {
-      const res = await fetch(`${API}/stops`);
+      const res = await fetch(`${API}/static/stops.json`);
       const data = await res.json();
-
       const stopsArray = Array.isArray(data) ? data : Object.values(data);
 
       allStops = stopsArray.filter(
@@ -163,6 +181,16 @@
           s.stop_lon &&
           isInDublin(parseFloat(s.stop_lat), parseFloat(s.stop_lon))
       );
+
+      // Build stop_id -> {lat, lng} lookup for bearing calculations
+      for (const s of stopsArray) {
+        if (s.stop_id && s.stop_lat && s.stop_lon) {
+          stopLatLng.set(s.stop_id, {
+            lat: parseFloat(s.stop_lat),
+            lng: parseFloat(s.stop_lon),
+          });
+        }
+      }
     } catch (e) {
       console.warn("Could not load stops", e);
     }
@@ -171,13 +199,11 @@
   async function fetchShapes() {
     try {
       const [shapesRes, tripsRes] = await Promise.all([
-        fetch(`${API}/static/shapes.json`),
+        fetch(`${API}/static/shapes.txt`),
         fetch(`${API}/static/trips.json`),
       ]);
 
-      // ----- TRIPS -----
       const tripsJson = await tripsRes.json();
-
       const trips = Array.isArray(tripsJson)
         ? tripsJson
         : tripsJson.results || [];
@@ -188,13 +214,31 @@
         }
       }
 
-      // ----- SHAPES -----
-      const shapesJson = await shapesRes.json();
+      const text = await shapesRes.text();
+      const lines = text.trim().split("\n");
+      const headers = lines[0].split(",").map((h) => h.trim());
+      const idIdx = headers.indexOf("shape_id");
+      const latIdx = headers.indexOf("shape_pt_lat");
+      const lngIdx = headers.indexOf("shape_pt_lon");
+      const seqIdx = headers.indexOf("shape_pt_sequence");
 
-      Object.entries(shapesJson).forEach(([id, points]) => {
+      const raw = new Map();
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",");
+        const id = cols[idIdx]?.trim();
+        if (!id) continue;
+        if (!raw.has(id)) raw.set(id, []);
+        raw.get(id).push({
+          seq: parseInt(cols[seqIdx]),
+          lat: parseFloat(cols[latIdx]),
+          lng: parseFloat(cols[lngIdx]),
+        });
+      }
+
+      raw.forEach((points, id) => {
         shapePoints.set(
           id,
-          points.sort((a, b) => a.shape_pt_sequence - b.shape_pt_sequence)
+          points.sort((a, b) => a.seq - b.seq)
         );
       });
 
@@ -204,32 +248,81 @@
     }
   }
 
-  async function fetchRouteStops(routeId) {
+  async function fetchRouteStops(routeNames) {
     try {
-      const res = await fetch(`${API}/route-stops?route_id=${routeId}`);
-      if (!res.ok) throw new Error(await res.text());
+      const tripsRes = await fetch(`${API}/trips`);
+      const tripsJson = await tripsRes.json();
 
-      const data = await res.json();
+      // --- handle trips format (object → array) ---
+      const tripsArray = Array.isArray(tripsJson)
+        ? tripsJson
+        : Object.entries(tripsJson.trips).map(([trip_id, t]) => ({
+            trip_id,
+            ...t,
+          }));
 
-      // Build Map: route_id → Set(stop_id)
-      const map = new Map();
+      // --- map trip_id -> normalized route ---
+      const tripToNormalizedRoute = new Map();
 
-      for (const row of data) {
-        const route = row.route_id;
-        const stopId = row.stop_id;
-
-        if (!map.has(route)) {
-          map.set(route, new Set());
+      for (const trip of tripsArray) {
+        const shortName = routeNames[trip.route_id?.trim()];
+        if (shortName) {
+          tripToNormalizedRoute.set(trip.trip_id, normalize(shortName));
         }
-        map.get(route).add(stopId);
       }
 
-      routeStopIds = map;
+      // --- CLEAR existing maps ---
+      routeStopIds = new Map();
+      tripStopSequence = new Map();
 
-      console.log("Route stops loaded:", routeStopIds);
-      renderStops();
-    } catch (err) {
-      console.error("Could not load route stops", err);
+      // 🚀 KEY FIX: use ACTIVE buses only
+      const activeTripIds = new Set(
+        buses
+          .map((b) => b.tripId)
+          .filter((id) => id && tripToNormalizedRoute.has(id))
+      );
+
+      console.log("Active trips:", activeTripIds.size);
+
+      for (const tripId of activeTripIds) {
+        try {
+          const res = await fetch(`${API}/schedule/${tripId}`);
+          if (!res.ok) continue;
+
+          const stops = await res.json();
+          if (!stops.length) continue;
+
+          const normalizedRoute = tripToNormalizedRoute.get(tripId);
+          if (!normalizedRoute) continue;
+
+          // --- route -> stop_ids ---
+          if (!routeStopIds.has(normalizedRoute)) {
+            routeStopIds.set(normalizedRoute, new Set());
+          }
+
+          // --- trip -> ordered stops ---
+          const orderedStops = stops
+            .map((s) => ({
+              stop_id: s.stop_id,
+              seq: parseInt(s.stop_sequence),
+            }))
+            .sort((a, b) => a.seq - b.seq);
+
+          tripStopSequence.set(tripId, orderedStops);
+
+          // --- add stops to route ---
+          for (const s of orderedStops) {
+            routeStopIds.get(normalizedRoute).add(s.stop_id);
+          }
+        } catch (err) {
+          console.warn(`Failed trip ${tripId}`, err);
+        }
+      }
+
+      console.log("✅ Route stops loaded:", routeStopIds.size);
+      console.log("✅ Trip sequences loaded:", tripStopSequence.size);
+    } catch (e) {
+      console.warn("❌ Could not load route stops", e);
     }
   }
 
@@ -258,9 +351,7 @@
       .openPopup();
 
     try {
-      const res = await fetch(
-        `https://bus-times.ciaranjmcgann.workers.dev/stop-times/${stop.stop_id}`
-      );
+      const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
       const times = await res.json();
 
       const now = new Date();
@@ -313,32 +404,36 @@
     }
   }
 
-  function showStopsForRoute(normalizedRoute) {
+  function showStopsForTrip(tripId) {
     if (stopLayerGroup) {
       stopLayerGroup.clearLayers();
     } else {
       stopLayerGroup = L.layerGroup().addTo(map);
     }
 
-    if (!normalizedRoute) return;
+    if (!tripId) return;
 
-    const matchingStopIds = routeStopIds.get(normalizedRoute) || new Set();
-    if (matchingStopIds.size === 0) return;
+    const stopsForTrip = tripStopSequence.get(tripId);
+    if (!stopsForTrip || stopsForTrip.length === 0) return;
 
     const bounds = map.getBounds().pad(0.1);
 
-    allStops.forEach((stop) => {
-      if (!matchingStopIds.has(stop.stop_id)) return;
+    stopsForTrip.forEach((s) => {
+      const stop = allStops.find((st) => st.stop_id === s.stop_id);
+      if (!stop) return;
 
       const lat = parseFloat(stop.stop_lat);
       const lng = parseFloat(stop.stop_lon);
+
       if (!bounds.contains([lat, lng])) return;
 
       const marker = L.marker([lat, lng], { icon: makeStopIcon() });
+
       marker.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
         showStopPopup(marker, stop);
       });
+
       stopLayerGroup.addLayer(marker);
     });
   }
@@ -364,9 +459,7 @@
 
   async function fetchBuses(routeNames) {
     try {
-      const res = await fetch(
-        "https://bus-times.ciaranjmcgann.workers.dev/vehicles"
-      );
+      const res = await fetch(`${API}/vehicles`);
       if (!res.ok) return { buses: [], feedTimestamp: null };
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
@@ -402,12 +495,9 @@
 
   function shouldShow(normalizedRoute) {
     const term = normalize(searchTerm);
-
     const matchesSearch = !searchTerm || normalizedRoute.startsWith(term);
-
     const matchesFavourites =
       !favouritesMode || favourites.includes(normalizedRoute);
-
     return matchesSearch && matchesFavourites;
   }
 
@@ -441,7 +531,7 @@
       }
     });
 
-    showStopsForRoute(normalize(selectedRoute));
+    showStopsForTrip(selectedTripId);
 
     if (shouldAutoFit && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
@@ -457,14 +547,17 @@
         direction: "top",
         className: "bus-label",
       })
-      .on("click", async (e) => {
+      .on("click", (e) => {
         L.DomEvent.stopPropagation(e);
-
         selectedRoute = normalizedRoute;
-
-        applySearch(); // only updates highlight, NOT filtering
+        selectedTripId = bus.tripId;
+        applySearch();
       });
   }
+
+  // cache to avoid refetching same trips
+  // cache to avoid refetching same trips
+  let loadedTripIds = new Set();
 
   async function refreshBuses(routeNames, isBackground = false) {
     if (isFetching) return;
@@ -478,6 +571,7 @@
         clusterGroup.clearLayers();
       }
 
+      // --- remove old buses ---
       busData.forEach((entry, id) => {
         if (!incomingIds.has(id)) {
           clusterGroup.removeLayer(entry.marker);
@@ -485,6 +579,7 @@
         }
       });
 
+      // --- update / add buses ---
       newBuses.forEach((newBus) => {
         const normalizedRoute = normalize(newBus.routeName);
         const bearing = resolveBearing(newBus);
@@ -497,6 +592,7 @@
           entry.tripId = newBus.tripId;
           entry.normalizedRoute = normalizedRoute;
           entry.marker.setLatLng([newBus.lat, newBus.lng]);
+
           const img = entry.marker.getElement?.()?.querySelector("img");
           if (img) img.style.transform = `rotate(${bearing}deg)`;
         } else {
@@ -510,10 +606,29 @@
         }
       });
 
+      // ✅ update buses FIRST
       buses = newBuses;
+
+      // 🚀 NOW buses exist → safe to use
+      const activeTripIds = new Set(buses.map((b) => b.tripId).filter(Boolean));
+
+      const newTripIds = [...activeTripIds].filter(
+        (id) => !loadedTripIds.has(id)
+      );
+
+      if (newTripIds.length > 0) {
+        console.log("Fetching new trip schedules:", newTripIds.length);
+
+        await fetchRouteStops(routeNames); // ✅ NOW works properly
+
+        newTripIds.forEach((id) => loadedTripIds.add(id));
+      }
+
+      // --- timestamps ---
       if (feedTimestamp && feedTimestamp !== lastUpdated) {
         lastUpdated = feedTimestamp;
       }
+
       updateTimer();
       applySearch();
     } catch (err) {
@@ -529,19 +644,10 @@
     }
   }
 
+  let routeNamesGlobal = {};
+
   function refreshPage() {
-    // preserve current map view
-    const center = map.getCenter();
-    const zoom = map.getZoom();
-
-    // refresh buses only
-    // (assuming routeNames is already available in scope)
-    refreshBuses(routeNames, false);
-
-    // restore map position after refresh
-    setTimeout(() => {
-      map.setView(center, zoom, { animate: false });
-    }, 0);
+    refreshBuses(routeNamesGlobal, false);
   }
 
   onMount(async () => {
@@ -615,6 +721,7 @@
       fetchShapes(),
     ]);
 
+    routeNamesGlobal = routeNames;
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
     await fetchRouteStops(routeNames);
 
@@ -638,8 +745,6 @@
             })
               .addTo(map)
               .bindPopup("You are here");
-
-            // Only center ONCE
             map.setView([latitude, longitude], 15);
           }
         },
@@ -753,10 +858,10 @@
   :global(.selected-bus) {
     transform: scale(1.4);
     z-index: 1000 !important;
-
     filter: drop-shadow(0 0 0px orange) drop-shadow(0 0 4px orange)
       drop-shadow(0 0 8px orange) drop-shadow(0 0 12px rgba(255, 165, 0, 0.9));
   }
+
   :global(.cluster-icon) {
     width: 36px;
     height: 36px;
