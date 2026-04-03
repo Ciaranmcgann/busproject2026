@@ -15,6 +15,7 @@
   let clusterGroup;
   let locationMarker = null;
 
+  let shapeLayerGroup = null;
   let isFetching = false;
   let FeedMessage;
   let buses = [];
@@ -30,8 +31,8 @@
 
   let shapePoints = new Map();
   let tripShapeMap = new Map();
-  let tripStopSequence = new Map(); // trip_id -> [{stop_id, seq}] sorted
-  let stopLatLng = new Map(); // stop_id -> {lat, lng}
+  let tripStopSequence = new Map();
+  let stopLatLng = new Map();
   let shouldAutoFit = false;
   let selectedTripId = "";
 
@@ -79,8 +80,16 @@
     return (toDeg(Math.atan2(y, x)) + 360) % 360;
   }
 
-  // Find bearing from trip's stop sequence —
-  // finds the two consecutive stops the bus is between and returns heading
+  // Returns "northbound", "southbound", or "unknown"
+  function getTripDirection(tripId) {
+    const stops = tripStopSequence.get(tripId);
+    if (!stops || stops.length < 2) return "unknown";
+    const first = stopLatLng.get(stops[0].stop_id);
+    const last = stopLatLng.get(stops[stops.length - 1].stop_id);
+    if (!first || !last) return "unknown";
+    return last.lat > first.lat ? "northbound" : "southbound";
+  }
+
   function getBearingFromStops(tripId, busLat, busLng) {
     const stops = tripStopSequence.get(tripId);
     if (!stops || stops.length < 2) return null;
@@ -100,7 +109,6 @@
       }
     }
 
-    // Use nearest stop -> next stop as direction
     const nextIdx = Math.min(nearestIdx + 1, stops.length - 1);
     const from = stopLatLng.get(stops[nearestIdx].stop_id);
     const to = stopLatLng.get(stops[nextIdx].stop_id);
@@ -111,30 +119,32 @@
     return calculateBearing(from.lat, from.lng, to.lat, to.lng);
   }
 
-  // Fallback to shape-based bearing if stop-based fails
   function getBearingFromShape(shapeId, busLat, busLng) {
     const points = shapePoints.get(shapeId);
     if (!points || points.length < 2) return null;
 
-    let nearestIdx = 0;
-    let nearestDist = Infinity;
-    for (let i = 0; i < points.length; i++) {
-      const dLat = points[i].lat - busLat;
-      const dLng = points[i].lng - busLng;
+    let bestBearing = null;
+    let bestDist = Infinity;
+
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      const midLat = (a.lat + b.lat) / 2;
+      const midLng = (a.lng + b.lng) / 2;
+      const dLat = midLat - busLat;
+      const dLng = midLng - busLng;
       const dist = dLat * dLat + dLng * dLng;
-      if (dist < nearestDist) {
-        nearestDist = dist;
-        nearestIdx = i;
+
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestBearing = calculateBearing(a.lat, a.lng, b.lat, b.lng);
       }
     }
 
-    const from = points[nearestIdx];
-    const to = points[Math.min(nearestIdx + 1, points.length - 1)];
-    return calculateBearing(from.lat, from.lng, to.lat, to.lng);
+    return bestBearing;
   }
 
   function resolveBearing(newBus) {
-    // Try stop-sequence bearing first (most accurate for direction)
     const stopBearing = getBearingFromStops(
       newBus.tripId,
       newBus.lat,
@@ -142,7 +152,6 @@
     );
     if (stopBearing !== null) return stopBearing;
 
-    // Fall back to shape-based bearing
     const shapeId = tripShapeMap.get(newBus.tripId);
     if (shapeId) {
       const shapeBearing = getBearingFromShape(shapeId, newBus.lat, newBus.lng);
@@ -182,7 +191,6 @@
           isInDublin(parseFloat(s.stop_lat), parseFloat(s.stop_lon))
       );
 
-      // Build stop_id -> {lat, lng} lookup for bearing calculations
       for (const s of stopsArray) {
         if (s.stop_id && s.stop_lat && s.stop_lon) {
           stopLatLng.set(s.stop_id, {
@@ -242,7 +250,12 @@
         );
       });
 
-      console.log("Shapes loaded:", shapePoints.size);
+      console.log(
+        "Shapes loaded:",
+        shapePoints.size,
+        "tripShapeMap:",
+        tripShapeMap.size
+      );
     } catch (e) {
       console.warn("Could not load shapes", e);
     }
@@ -253,7 +266,6 @@
       const tripsRes = await fetch(`${API}/trips`);
       const tripsJson = await tripsRes.json();
 
-      // --- handle trips format (object → array) ---
       const tripsArray = Array.isArray(tripsJson)
         ? tripsJson
         : Object.entries(tripsJson.trips).map(([trip_id, t]) => ({
@@ -261,9 +273,7 @@
             ...t,
           }));
 
-      // --- map trip_id -> normalized route ---
       const tripToNormalizedRoute = new Map();
-
       for (const trip of tripsArray) {
         const shortName = routeNames[trip.route_id?.trim()];
         if (shortName) {
@@ -271,11 +281,9 @@
         }
       }
 
-      // --- CLEAR existing maps ---
       routeStopIds = new Map();
       tripStopSequence = new Map();
 
-      // 🚀 KEY FIX: use ACTIVE buses only
       const activeTripIds = new Set(
         buses
           .map((b) => b.tripId)
@@ -295,12 +303,10 @@
           const normalizedRoute = tripToNormalizedRoute.get(tripId);
           if (!normalizedRoute) continue;
 
-          // --- route -> stop_ids ---
           if (!routeStopIds.has(normalizedRoute)) {
             routeStopIds.set(normalizedRoute, new Set());
           }
 
-          // --- trip -> ordered stops ---
           const orderedStops = stops
             .map((s) => ({
               stop_id: s.stop_id,
@@ -310,7 +316,6 @@
 
           tripStopSequence.set(tripId, orderedStops);
 
-          // --- add stops to route ---
           for (const s of orderedStops) {
             routeStopIds.get(normalizedRoute).add(s.stop_id);
           }
@@ -339,13 +344,11 @@
   async function showStopPopup(marker, stop) {
     marker
       .bindPopup(
-        `
-      <div class="stop-popup">
-        <div class="stop-popup-name">${stop.stop_name}</div>
-        <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-        <div class="stop-popup-empty">Loading arrivals...</div>
-      </div>
-    `,
+        `<div class="stop-popup">
+          <div class="stop-popup-name">${stop.stop_name}</div>
+          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+          <div class="stop-popup-empty">Loading arrivals...</div>
+        </div>`,
         { maxWidth: 260 }
       )
       .openPopup();
@@ -370,20 +373,17 @@
             <div class="stop-popup-name">${stop.stop_name}</div>
             <div class="stop-popup-code">Stop ${stop.stop_code}</div>
             <div class="stop-popup-empty">No upcoming arrivals</div>
-          </div>
-        `);
+          </div>`);
         return;
       }
 
       const rows = upcoming
         .map((t) => {
           const [h, m] = t.arrival_time.split(":");
-          return `
-          <div class="stop-popup-row">
+          return `<div class="stop-popup-row">
             <span class="stop-popup-time">${h}:${m}</span>
             <span class="stop-popup-trip">${t.trip_id}</span>
-          </div>
-        `;
+          </div>`;
         })
         .join("");
 
@@ -392,65 +392,135 @@
           <div class="stop-popup-name">${stop.stop_name}</div>
           <div class="stop-popup-code">Stop ${stop.stop_code}</div>
           ${rows}
-        </div>
-      `);
+        </div>`);
     } catch (err) {
       marker.setPopupContent(`
         <div class="stop-popup">
           <div class="stop-popup-name">${stop.stop_name}</div>
           <div class="stop-popup-empty">Failed to load arrivals</div>
-        </div>
-      `);
+        </div>`);
     }
   }
 
   function showStopsForTrip(tripId) {
-    if (stopLayerGroup) {
-      stopLayerGroup.clearLayers();
-    } else {
-      stopLayerGroup = L.layerGroup().addTo(map);
-    }
+    if (stopLayerGroup) stopLayerGroup.clearLayers();
+    else stopLayerGroup = L.layerGroup().addTo(map);
+
+    if (shapeLayerGroup) shapeLayerGroup.clearLayers();
+    else shapeLayerGroup = L.layerGroup().addTo(map);
 
     if (!tripId) return;
 
     const stopsForTrip = tripStopSequence.get(tripId);
     if (!stopsForTrip || stopsForTrip.length === 0) return;
 
+    const direction = getTripDirection(tripId);
+    const isNorthbound = direction === "northbound";
+    const lineColor = isNorthbound ? "#ff8c00" : "#00cfff";
+    const arrowColor = isNorthbound ? "#ff8c00" : "#00cfff";
+
     const bounds = map.getBounds().pad(0.1);
 
-    stopsForTrip.forEach((s) => {
-      const stop = allStops.find((st) => st.stop_id === s.stop_id);
-      if (!stop) return;
+    // Build ordered list of stops with lat/lng
+    const orderedStops = stopsForTrip
+      .map((s) => {
+        const stop = allStops.find((st) => st.stop_id === s.stop_id);
+        if (!stop) return null;
+        return {
+          ...stop,
+          lat: parseFloat(stop.stop_lat),
+          lng: parseFloat(stop.stop_lon),
+        };
+      })
+      .filter(Boolean);
 
-      const lat = parseFloat(stop.stop_lat);
-      const lng = parseFloat(stop.stop_lon);
+    if (orderedStops.length >= 2) {
+      // Draw dashed connecting line through all stops
+      L.polyline(
+        orderedStops.map((s) => [s.lat, s.lng]),
+        {
+          color: lineColor,
+          weight: 3,
+          opacity: 0.6,
+          lineJoin: "round",
+          lineCap: "round",
+          dashArray: "6 4",
+        }
+      ).addTo(shapeLayerGroup);
 
-      if (!bounds.contains([lat, lng])) return;
+      // Draw a directional arrow at the midpoint between each pair of stops
+      for (let i = 0; i < orderedStops.length - 1; i++) {
+        const from = orderedStops[i];
+        const to = orderedStops[i + 1];
+        const bearing = calculateBearing(from.lat, from.lng, to.lat, to.lng);
+        const midLat = (from.lat + to.lat) / 2;
+        const midLng = (from.lng + to.lng) / 2;
 
-      const marker = L.marker([lat, lng], { icon: makeStopIcon() });
+        const arrowIcon = L.divIcon({
+          className: "",
+          html: `<svg
+            width="20" height="20"
+            viewBox="0 0 20 20"
+            style="transform: rotate(${bearing}deg); display: block;"
+            xmlns="http://www.w3.org/2000/svg">
+            <polygon
+              points="10,2 17,16 10,12 3,16"
+              fill="${arrowColor}"
+              fill-opacity="0.9"
+              stroke="white"
+              stroke-width="1.5"
+              stroke-linejoin="round"
+            />
+          </svg>`,
+          iconSize: [20, 20],
+          iconAnchor: [10, 10],
+        });
 
+        L.marker([midLat, midLng], {
+          icon: arrowIcon,
+          interactive: false,
+          zIndexOffset: -100,
+        }).addTo(shapeLayerGroup);
+      }
+    }
+
+    // Draw stop markers (only ones in viewport)
+    orderedStops.forEach((stop) => {
+      if (!bounds.contains([stop.lat, stop.lng])) return;
+      const marker = L.marker([stop.lat, stop.lng], { icon: makeStopIcon() });
       marker.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
         showStopPopup(marker, stop);
       });
-
       stopLayerGroup.addLayer(marker);
     });
   }
 
-  function makeBusIcon(bearing) {
+  function makeBusIcon(
+    bearing,
+    dimmed = false,
+    selected = false,
+    direction = "unknown"
+  ) {
     const rotation = bearing || 0;
+    const flipped = rotation > 0 && rotation < 180;
+    const glowColor = direction === "northbound" ? "orange" : "#00cfff";
+    const selectedFilter = `drop-shadow(0 0 0px ${glowColor}) drop-shadow(0 0 8px ${glowColor})`;
     return L.divIcon({
       className: "",
       html: `
-        <div class="bus-marker-wrap">
+        <div class="bus-marker-wrap" style="
+          opacity: ${dimmed ? 0.2 : 1};
+          transform: ${selected ? "scale(1.4)" : "scale(1)"};
+          filter: ${selected ? selectedFilter : "none"};
+          transition: opacity 0.2s, filter 0.2s;
+        ">
           <img
             src="${import.meta.env.BASE_URL}bus.png"
             class="bus-img"
-            style="transform: rotate(${rotation}deg);"
+            style="transform: rotate(${rotation + 90}deg) ${flipped ? "scaleX(-1)" : ""};"
           />
-        </div>
-      `,
+        </div>`,
       iconSize: [40, 40],
       iconAnchor: [20, 20],
       popupAnchor: [0, -20],
@@ -510,35 +580,38 @@
     if (!map || !clusterGroup) return;
 
     const visibleMarkers = [];
-    clusterGroup.clearLayers();
 
     busData.forEach((bus) => {
       const visible = shouldShow(bus.normalizedRoute);
       const inViewport = isNearViewport(bus.lat, bus.lng);
 
       if (visible && inViewport) {
-        clusterGroup.addLayer(bus.marker);
+        if (!clusterGroup.hasLayer(bus.marker)) {
+          clusterGroup.addLayer(bus.marker);
+        }
         visibleMarkers.push(bus.marker);
-      }
-
-      const el = bus.marker.getElement?.();
-      if (el) {
-        if (selectedRoute && bus.normalizedRoute === normalize(selectedRoute)) {
-          el.classList.add("selected-bus");
-        } else {
-          el.classList.remove("selected-bus");
-          el.classList.add("dimmed-bus"); // 👈 dim everything else;
+      } else {
+        if (clusterGroup.hasLayer(bus.marker)) {
+          clusterGroup.removeLayer(bus.marker);
         }
       }
-    });
 
-    showStopsForTrip(selectedTripId);
+      const isSelected =
+        selectedRoute && bus.normalizedRoute === normalize(selectedRoute);
+      const isDimmed = selectedRoute && !isSelected;
+      const direction = getTripDirection(bus.tripId);
+      bus.marker.setIcon(
+        makeBusIcon(bus.bearing, isDimmed, isSelected, direction)
+      );
+    });
 
     if (shouldAutoFit && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
       map.fitBounds(group.getBounds().pad(0.05));
       shouldAutoFit = false;
     }
+
+    showStopsForTrip(selectedTripId);
   }
 
   function createMarker(bus, normalizedRoute) {
@@ -548,17 +621,33 @@
         direction: "top",
         className: "bus-label",
       })
-      .on("click", (e) => {
+      .on("click", async (e) => {
         L.DomEvent.stopPropagation(e);
         selectedRoute = normalizedRoute;
         selectedTripId = bus.tripId;
+
+        // Fetch stop sequence on demand if not loaded yet
+        if (!tripStopSequence.has(bus.tripId)) {
+          try {
+            const res = await fetch(`${API}/schedule/${bus.tripId}`);
+            if (res.ok) {
+              const stops = await res.json();
+              const ordered = stops
+                .map((s) => ({
+                  stop_id: s.stop_id,
+                  seq: parseInt(s.stop_sequence),
+                }))
+                .sort((a, b) => a.seq - b.seq);
+              tripStopSequence.set(bus.tripId, ordered);
+            }
+          } catch (err) {
+            console.warn("Failed to load stops for trip", bus.tripId, err);
+          }
+        }
+
         applySearch();
       });
   }
-
-  // cache to avoid refetching same trips
-  // cache to avoid refetching same trips
-  let loadedTripIds = new Set();
 
   async function refreshBuses(routeNames, isBackground = false) {
     if (isFetching) return;
@@ -572,7 +661,7 @@
         clusterGroup.clearLayers();
       }
 
-      // --- remove old buses ---
+      // Remove buses no longer in the feed
       busData.forEach((entry, id) => {
         if (!incomingIds.has(id)) {
           clusterGroup.removeLayer(entry.marker);
@@ -580,7 +669,7 @@
         }
       });
 
-      // --- update / add buses ---
+      // Update existing or add new buses
       newBuses.forEach((newBus) => {
         const normalizedRoute = normalize(newBus.routeName);
         const bearing = resolveBearing(newBus);
@@ -593,9 +682,13 @@
           entry.tripId = newBus.tripId;
           entry.normalizedRoute = normalizedRoute;
           entry.marker.setLatLng([newBus.lat, newBus.lng]);
-
-          const img = entry.marker.getElement?.()?.querySelector("img");
-          if (img) img.style.transform = `rotate(${bearing}deg)`;
+          const isSelected =
+            selectedRoute && normalizedRoute === normalize(selectedRoute);
+          const isDimmed = selectedRoute && !isSelected;
+          const direction = getTripDirection(newBus.tripId);
+          entry.marker.setIcon(
+            makeBusIcon(bearing, isDimmed, isSelected, direction)
+          );
         } else {
           const marker = createMarker({ ...newBus, bearing }, normalizedRoute);
           busData.set(newBus.id, {
@@ -607,25 +700,8 @@
         }
       });
 
-      // ✅ update buses FIRST
       buses = newBuses;
 
-      // 🚀 NOW buses exist → safe to use
-      const activeTripIds = new Set(buses.map((b) => b.tripId).filter(Boolean));
-
-      const newTripIds = [...activeTripIds].filter(
-        (id) => !loadedTripIds.has(id)
-      );
-
-      if (newTripIds.length > 0) {
-        console.log("Fetching new trip schedules:", newTripIds.length);
-
-        await fetchRouteStops(routeNames); // ✅ NOW works properly
-
-        newTripIds.forEach((id) => loadedTripIds.add(id));
-      }
-
-      // --- timestamps ---
       if (feedTimestamp && feedTimestamp !== lastUpdated) {
         lastUpdated = feedTimestamp;
       }
@@ -700,6 +776,9 @@
     map.on("moveend zoomend", () => applySearch());
     map.on("click", () => {
       selectedRoute = "";
+      selectedTripId = "";
+      if (shapeLayerGroup) shapeLayerGroup.clearLayers();
+      if (stopLayerGroup) stopLayerGroup.clearLayers();
       applySearch();
     });
 
@@ -724,9 +803,15 @@
 
     routeNamesGlobal = routeNames;
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
-    await fetchRouteStops(routeNames);
 
-    refreshBuses(routeNames, false);
+    // Show buses immediately — shapes loaded so bearing is correct on first render
+    await refreshBuses(routeNames, false);
+
+    // Load per-trip stop sequences in background
+    fetchRouteStops(routeNames).then(() => {
+      applySearch();
+    });
+
     setInterval(() => refreshBuses(routeNames, true), 15000);
 
     if (navigator.geolocation) {
@@ -831,11 +916,6 @@
     width: 100%;
     height: 100%;
   }
-  .dimmed-bus {
-    opacity: 0.2;
-    transform: scale(1);
-    z-index: 1;
-  }
 
   :global(.bus-marker-wrap) {
     width: 40px;
@@ -859,13 +939,6 @@
     font-weight: bold;
     font-size: 11px;
     padding: 2px 5px;
-  }
-
-  :global(.selected-bus) {
-    transform: scale(1.4);
-    z-index: 1000 !important;
-    filter: drop-shadow(0 0 0px orange) drop-shadow(0 0 4px orange)
-      drop-shadow(0 0 8px orange) drop-shadow(0 0 12px rgba(255, 165, 0, 0.9));
   }
 
   :global(.cluster-icon) {
@@ -957,7 +1030,6 @@
   .locate-btn {
     top: 70px;
   }
-
   .refresh-btn {
     top: 130px;
   }
