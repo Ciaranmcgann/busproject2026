@@ -703,7 +703,7 @@
     });
 
     L.tileLayer(
-      "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png",
+      "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
       {
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap contributors",
