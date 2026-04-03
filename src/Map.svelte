@@ -527,6 +527,7 @@
           el.classList.add("selected-bus");
         } else {
           el.classList.remove("selected-bus");
+          el.classList.add("dimmed-bus"); // 👈 dim everything else;
         }
       }
     });
@@ -640,7 +641,7 @@
 
   function locateMe() {
     if (locationMarker) {
-      map.setView(locationMarker.getLatLng(), 15);
+      map.setView(locationMarker.getLatLng(), 17);
     }
   }
 
@@ -745,7 +746,7 @@
             })
               .addTo(map)
               .bindPopup("You are here");
-            map.setView([latitude, longitude], 15);
+            map.setView([latitude, longitude], 17);
           }
         },
         (err) => console.warn("Geolocation error:", err),
@@ -829,6 +830,11 @@
   .map {
     width: 100%;
     height: 100%;
+  }
+  .dimmed-bus {
+    opacity: 0.2;
+    transform: scale(1);
+    z-index: 1;
   }
 
   :global(.bus-marker-wrap) {
