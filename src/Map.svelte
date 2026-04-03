@@ -30,6 +30,9 @@
 
   let shapePoints = new Map();
   let tripShapeMap = new Map();
+  let shouldAutoFit = false;
+
+  const API = "https://bus-times.ciaranjmcgann.workers.dev";
 
   const DUBLIN_BOUNDS = {
     minLat: 53.14,
@@ -37,6 +40,11 @@
     minLng: -6.63,
     maxLng: -6.0,
   };
+
+  function onSearch() {
+    shouldAutoFit = true;
+    applySearch();
+  }
 
   function isInDublin(lat, lng) {
     return (
@@ -103,6 +111,26 @@
     return 0;
   }
 
+  $: filteredStops =
+    selectedRoute && routeStopIds.size
+      ? allStops.filter((stop) =>
+          routeStopIds.get(selectedRoute)?.has(stop.stop_id)
+        )
+      : allStops;
+
+  function buildRouteStops(routeStops) {
+    const map = new Map();
+
+    routeStops.forEach(({ route_id, stop_id }) => {
+      if (!map.has(route_id)) {
+        map.set(route_id, new Set());
+      }
+      map.get(route_id).add(stop_id);
+    });
+
+    routeStopIds = map;
+  }
+
   async function fetchRouteNames() {
     try {
       const res = await fetch(
@@ -124,11 +152,12 @@
 
   async function fetchStops() {
     try {
-      const res = await fetch(
-        "https://bus-times.ciaranjmcgann.workers.dev/static/stops.json"
-      );
+      const res = await fetch(`${API}/stops`);
       const data = await res.json();
-      allStops = data.filter(
+
+      const stopsArray = Array.isArray(data) ? data : Object.values(data);
+
+      allStops = stopsArray.filter(
         (s) =>
           s.stop_lat &&
           s.stop_lon &&
@@ -142,42 +171,30 @@
   async function fetchShapes() {
     try {
       const [shapesRes, tripsRes] = await Promise.all([
-        fetch("https://bus-times.ciaranjmcgann.workers.dev/static/shapes.txt"),
-        fetch("https://bus-times.ciaranjmcgann.workers.dev/static/trips.json"),
+        fetch(`${API}/static/shapes.json`),
+        fetch(`${API}/static/trips.json`),
       ]);
 
-      const trips = await tripsRes.json();
+      // ----- TRIPS -----
+      const tripsJson = await tripsRes.json();
+
+      const trips = Array.isArray(tripsJson)
+        ? tripsJson
+        : tripsJson.results || [];
+
       for (const trip of trips) {
         if (trip.trip_id && trip.shape_id) {
           tripShapeMap.set(trip.trip_id, trip.shape_id);
         }
       }
 
-      const text = await shapesRes.text();
-      const lines = text.trim().split("\n");
-      const headers = lines[0].split(",").map((h) => h.trim());
-      const idIdx = headers.indexOf("shape_id");
-      const latIdx = headers.indexOf("shape_pt_lat");
-      const lngIdx = headers.indexOf("shape_pt_lon");
-      const seqIdx = headers.indexOf("shape_pt_sequence");
+      // ----- SHAPES -----
+      const shapesJson = await shapesRes.json();
 
-      const raw = new Map();
-      for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(",");
-        const id = cols[idIdx]?.trim();
-        if (!id) continue;
-        if (!raw.has(id)) raw.set(id, []);
-        raw.get(id).push({
-          seq: parseInt(cols[seqIdx]),
-          lat: parseFloat(cols[latIdx]),
-          lng: parseFloat(cols[lngIdx]),
-        });
-      }
-
-      raw.forEach((points, id) => {
+      Object.entries(shapesJson).forEach(([id, points]) => {
         shapePoints.set(
           id,
-          points.sort((a, b) => a.seq - b.seq)
+          points.sort((a, b) => a.shape_pt_sequence - b.shape_pt_sequence)
         );
       });
 
@@ -187,34 +204,32 @@
     }
   }
 
-  async function fetchRouteStops(routeNames) {
+  async function fetchRouteStops(routeId) {
     try {
-      const [tripsRes, stopTimesRes] = await Promise.all([
-        fetch("https://bus-times.ciaranjmcgann.workers.dev/static/trips.json"),
-        fetch(
-          "https://bus-times.ciaranjmcgann.workers.dev/static/stop_times.json"
-        ),
-      ]);
-      const trips = await tripsRes.json();
-      const stopTimes = await stopTimesRes.json();
+      const res = await fetch(`${API}/route-stops?route_id=${routeId}`);
+      if (!res.ok) throw new Error(await res.text());
 
-      const tripToNormalizedRoute = new Map();
-      for (const trip of trips) {
-        const shortName = routeNames[trip.route_id?.trim()];
-        if (shortName) {
-          tripToNormalizedRoute.set(trip.trip_id, normalize(shortName));
+      const data = await res.json();
+
+      // Build Map: route_id → Set(stop_id)
+      const map = new Map();
+
+      for (const row of data) {
+        const route = row.route_id;
+        const stopId = row.stop_id;
+
+        if (!map.has(route)) {
+          map.set(route, new Set());
         }
+        map.get(route).add(stopId);
       }
 
-      for (const st of stopTimes) {
-        const normalizedRoute = tripToNormalizedRoute.get(st.trip_id);
-        if (!normalizedRoute) continue;
-        if (!routeStopIds.has(normalizedRoute))
-          routeStopIds.set(normalizedRoute, new Set());
-        routeStopIds.get(normalizedRoute).add(st.stop_id);
-      }
-    } catch (e) {
-      console.warn("Could not load route stops", e);
+      routeStopIds = map;
+
+      console.log("Route stops loaded:", routeStopIds);
+      renderStops();
+    } catch (err) {
+      console.error("Could not load route stops", err);
     }
   }
 
@@ -387,12 +402,13 @@
 
   function shouldShow(normalizedRoute) {
     const term = normalize(searchTerm);
-    const selected = normalize(selectedRoute);
+
     const matchesSearch = !searchTerm || normalizedRoute.startsWith(term);
-    const matchesSelected = !selectedRoute || normalizedRoute === selected;
+
     const matchesFavourites =
       !favouritesMode || favourites.includes(normalizedRoute);
-    return matchesSearch && matchesSelected && matchesFavourites;
+
+    return matchesSearch && matchesFavourites;
   }
 
   function isNearViewport(lat, lng) {
@@ -427,9 +443,10 @@
 
     showStopsForRoute(normalize(selectedRoute));
 
-    if (searchTerm && visibleMarkers.length > 0) {
+    if (shouldAutoFit && visibleMarkers.length > 0) {
       const group = L.featureGroup(visibleMarkers);
       map.fitBounds(group.getBounds().pad(0.05));
+      shouldAutoFit = false;
     }
   }
 
@@ -440,10 +457,12 @@
         direction: "top",
         className: "bus-label",
       })
-      .on("click", (e) => {
+      .on("click", async (e) => {
         L.DomEvent.stopPropagation(e);
+
         selectedRoute = normalizedRoute;
-        applySearch();
+
+        applySearch(); // only updates highlight, NOT filtering
       });
   }
 
@@ -511,7 +530,18 @@
   }
 
   function refreshPage() {
-    window.location.reload();
+    // preserve current map view
+    const center = map.getCenter();
+    const zoom = map.getZoom();
+
+    // refresh buses only
+    // (assuming routeNames is already available in scope)
+    refreshBuses(routeNames, false);
+
+    // restore map position after refresh
+    setTimeout(() => {
+      map.setView(center, zoom, { animate: false });
+    }, 0);
   }
 
   onMount(async () => {
@@ -605,6 +635,8 @@
             })
               .addTo(map)
               .bindPopup("You are here");
+
+            // Only center ONCE
             map.setView([latitude, longitude], 15);
           }
         },
@@ -718,9 +750,10 @@
   :global(.selected-bus) {
     transform: scale(1.4);
     z-index: 1000 !important;
-    filter: drop-shadow(0 0 6px rgba(26, 115, 232, 0.9));
-  }
 
+    filter: drop-shadow(0 0 0px orange) drop-shadow(0 0 4px orange)
+      drop-shadow(0 0 8px orange) drop-shadow(0 0 12px rgba(255, 165, 0, 0.9));
+  }
   :global(.cluster-icon) {
     width: 36px;
     height: 36px;
