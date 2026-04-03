@@ -9,7 +9,7 @@
 
   // Load favourites from localStorage on startup
   let favourites = JSON.parse(localStorage.getItem("bus-favourites") || "[]");
-  let favouritesMode = false;
+  let favouritesMode = localStorage.getItem("bus-favourites-mode") === "true";
 
   function handleSearch(event) {
     searchTerm = event.detail;
@@ -42,8 +42,8 @@
 
   function toggleMode() {
     favouritesMode = !favouritesMode;
+    localStorage.setItem("bus-favourites-mode", favouritesMode);
   }
-
   onMount(loadRoutes);
 </script>
 

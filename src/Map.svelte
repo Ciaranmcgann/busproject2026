@@ -26,6 +26,10 @@
   let lastUpdated = null;
   let timeSinceUpdate = "";
   let timerInterval;
+  let routeStopIds = new Map();
+
+  let shapePoints = new Map();
+  let tripShapeMap = new Map();
 
   const DUBLIN_BOUNDS = {
     minLat: 53.14,
@@ -56,6 +60,47 @@
       const mins = Math.floor(secs / 60);
       timeSinceUpdate = `Updated ${mins}m ago`;
     }
+  }
+
+  function calculateBearing(lat1, lng1, lat2, lng2) {
+    const toRad = (d) => (d * Math.PI) / 180;
+    const toDeg = (r) => (r * 180) / Math.PI;
+    const dLng = toRad(lng2 - lng1);
+    const y = Math.sin(dLng) * Math.cos(toRad(lat2));
+    const x =
+      Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+      Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLng);
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }
+
+  function getBearingFromShape(shapeId, busLat, busLng) {
+    const points = shapePoints.get(shapeId);
+    if (!points || points.length < 2) return null;
+
+    let nearestIdx = 0;
+    let nearestDist = Infinity;
+    for (let i = 0; i < points.length; i++) {
+      const dLat = points[i].lat - busLat;
+      const dLng = points[i].lng - busLng;
+      const dist = dLat * dLat + dLng * dLng;
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestIdx = i;
+      }
+    }
+
+    const from = points[nearestIdx];
+    const to = points[Math.min(nearestIdx + 1, points.length - 1)];
+    return calculateBearing(from.lat, from.lng, to.lat, to.lng);
+  }
+
+  function resolveBearing(newBus) {
+    const shapeId = tripShapeMap.get(newBus.tripId);
+    if (shapeId) {
+      const b = getBearingFromShape(shapeId, newBus.lat, newBus.lng);
+      if (b !== null) return b;
+    }
+    return 0;
   }
 
   async function fetchRouteNames() {
@@ -91,6 +136,85 @@
       );
     } catch (e) {
       console.warn("Could not load stops", e);
+    }
+  }
+
+  async function fetchShapes() {
+    try {
+      const [shapesRes, tripsRes] = await Promise.all([
+        fetch("https://bus-times.ciaranjmcgann.workers.dev/static/shapes.txt"),
+        fetch("https://bus-times.ciaranjmcgann.workers.dev/static/trips.json"),
+      ]);
+
+      const trips = await tripsRes.json();
+      for (const trip of trips) {
+        if (trip.trip_id && trip.shape_id) {
+          tripShapeMap.set(trip.trip_id, trip.shape_id);
+        }
+      }
+
+      const text = await shapesRes.text();
+      const lines = text.trim().split("\n");
+      const headers = lines[0].split(",").map((h) => h.trim());
+      const idIdx = headers.indexOf("shape_id");
+      const latIdx = headers.indexOf("shape_pt_lat");
+      const lngIdx = headers.indexOf("shape_pt_lon");
+      const seqIdx = headers.indexOf("shape_pt_sequence");
+
+      const raw = new Map();
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",");
+        const id = cols[idIdx]?.trim();
+        if (!id) continue;
+        if (!raw.has(id)) raw.set(id, []);
+        raw.get(id).push({
+          seq: parseInt(cols[seqIdx]),
+          lat: parseFloat(cols[latIdx]),
+          lng: parseFloat(cols[lngIdx]),
+        });
+      }
+
+      raw.forEach((points, id) => {
+        shapePoints.set(
+          id,
+          points.sort((a, b) => a.seq - b.seq)
+        );
+      });
+
+      console.log("Shapes loaded:", shapePoints.size);
+    } catch (e) {
+      console.warn("Could not load shapes", e);
+    }
+  }
+
+  async function fetchRouteStops(routeNames) {
+    try {
+      const [tripsRes, stopTimesRes] = await Promise.all([
+        fetch("https://bus-times.ciaranjmcgann.workers.dev/static/trips.json"),
+        fetch(
+          "https://bus-times.ciaranjmcgann.workers.dev/static/stop_times.json"
+        ),
+      ]);
+      const trips = await tripsRes.json();
+      const stopTimes = await stopTimesRes.json();
+
+      const tripToNormalizedRoute = new Map();
+      for (const trip of trips) {
+        const shortName = routeNames[trip.route_id?.trim()];
+        if (shortName) {
+          tripToNormalizedRoute.set(trip.trip_id, normalize(shortName));
+        }
+      }
+
+      for (const st of stopTimes) {
+        const normalizedRoute = tripToNormalizedRoute.get(st.trip_id);
+        if (!normalizedRoute) continue;
+        if (!routeStopIds.has(normalizedRoute))
+          routeStopIds.set(normalizedRoute, new Set());
+        routeStopIds.get(normalizedRoute).add(st.stop_id);
+      }
+    } catch (e) {
+      console.warn("Could not load route stops", e);
     }
   }
 
@@ -183,9 +307,14 @@
 
     if (!normalizedRoute) return;
 
+    const matchingStopIds = routeStopIds.get(normalizedRoute) || new Set();
+    if (matchingStopIds.size === 0) return;
+
     const bounds = map.getBounds().pad(0.1);
 
     allStops.forEach((stop) => {
+      if (!matchingStopIds.has(stop.stop_id)) return;
+
       const lat = parseFloat(stop.stop_lat);
       const lng = parseFloat(stop.stop_lon);
       if (!bounds.contains([lat, lng])) return;
@@ -195,7 +324,6 @@
         L.DomEvent.stopPropagation(e);
         showStopPopup(marker, stop);
       });
-
       stopLayerGroup.addLayer(marker);
     });
   }
@@ -224,27 +352,36 @@
       const res = await fetch(
         "https://bus-times.ciaranjmcgann.workers.dev/vehicles"
       );
-      if (!res.ok) return [];
+      if (!res.ok) return { buses: [], feedTimestamp: null };
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
-      return feed.entity
+
+      const feedTimestamp = feed.header?.timestamp
+        ? Number(feed.header.timestamp) * 1000
+        : null;
+
+      const buses = feed.entity
         .map((e) => ({ id: e.id, vehicle: e.vehicle }))
         .filter(({ vehicle: v }) => v && v.position)
         .map(({ id, vehicle: v }) => {
           const routeId = v.trip?.routeId || "";
+          const tripId = v.trip?.tripId || "";
           const routeName = routeNames[routeId] || "N/A";
+          const stableId = v.vehicle?.id || v.vehicle?.label || id;
           return {
-            id,
+            id: stableId,
             routeName,
+            tripId,
             lat: v.position.latitude,
             lng: v.position.longitude,
-            bearing: v.position.bearing || 0,
           };
         })
         .filter((bus) => isInDublin(bus.lat, bus.lng));
+
+      return { buses, feedTimestamp };
     } catch (err) {
       console.error("Fetch buses failed:", err);
-      return [];
+      return { buses: [], feedTimestamp: null };
     }
   }
 
@@ -315,15 +452,13 @@
     isFetching = true;
 
     try {
-      const newBuses = await fetchBuses(routeNames);
+      const { buses: newBuses, feedTimestamp } = await fetchBuses(routeNames);
       const incomingIds = new Set(newBuses.map((b) => b.id));
 
       if (!isBackground) {
-        // Full reload — clear cluster completely first
         clusterGroup.clearLayers();
       }
 
-      // Remove buses no longer in the feed
       busData.forEach((entry, id) => {
         if (!incomingIds.has(id)) {
           clusterGroup.removeLayer(entry.marker);
@@ -331,28 +466,35 @@
         }
       });
 
-      // Update existing or add new
       newBuses.forEach((newBus) => {
         const normalizedRoute = normalize(newBus.routeName);
+        const bearing = resolveBearing(newBus);
 
         if (busData.has(newBus.id)) {
           const entry = busData.get(newBus.id);
           entry.lat = newBus.lat;
           entry.lng = newBus.lng;
-          entry.bearing = newBus.bearing;
+          entry.bearing = bearing;
+          entry.tripId = newBus.tripId;
           entry.normalizedRoute = normalizedRoute;
           entry.marker.setLatLng([newBus.lat, newBus.lng]);
           const img = entry.marker.getElement?.()?.querySelector("img");
-          if (img) img.style.transform = `rotate(${newBus.bearing || 0}deg)`;
+          if (img) img.style.transform = `rotate(${bearing}deg)`;
         } else {
-          // New bus — create marker but don't add to cluster yet
-          const marker = createMarker(newBus, normalizedRoute);
-          busData.set(newBus.id, { ...newBus, normalizedRoute, marker });
+          const marker = createMarker({ ...newBus, bearing }, normalizedRoute);
+          busData.set(newBus.id, {
+            ...newBus,
+            bearing,
+            normalizedRoute,
+            marker,
+          });
         }
       });
 
       buses = newBuses;
-      lastUpdated = Date.now();
+      if (feedTimestamp && feedTimestamp !== lastUpdated) {
+        lastUpdated = feedTimestamp;
+      }
       updateTimer();
       applySearch();
     } catch (err) {
@@ -437,15 +579,14 @@
       protobuf.load(protoUrl),
       fetchRouteNames(),
       fetchStops(),
+      fetchShapes(),
     ]);
 
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
+    await fetchRouteStops(routeNames);
 
-    // First load — full refresh
     refreshBuses(routeNames, false);
-
-    // Background — silent position updates only
-    setInterval(() => refreshBuses(routeNames, true), 45000);
+    setInterval(() => refreshBuses(routeNames, true), 15000);
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
