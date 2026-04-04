@@ -7,9 +7,9 @@
   let searchTerm = "";
   let routes = [];
 
-  // Load favourites from localStorage on startup
   let favourites = JSON.parse(localStorage.getItem("bus-favourites") || "[]");
   let favouritesMode = localStorage.getItem("bus-favourites-mode") === "true";
+  let showStops = false;
 
   function handleSearch(event) {
     searchTerm = event.detail;
@@ -36,7 +36,6 @@
     } else {
       favourites = [...favourites, normalized];
     }
-    // Save to localStorage whenever it changes
     localStorage.setItem("bus-favourites", JSON.stringify(favourites));
   }
 
@@ -44,6 +43,11 @@
     favouritesMode = !favouritesMode;
     localStorage.setItem("bus-favourites-mode", favouritesMode);
   }
+
+  function toggleStops() {
+    showStops = !showStops;
+  }
+
   onMount(loadRoutes);
 </script>
 
@@ -55,9 +59,29 @@
       {searchTerm}
       {favourites}
       {favouritesMode}
+      {showStops}
       on:addFavourite={(e) => toggleFavourite(e.detail)}
     />
   </main>
+
+  <button
+    class="stops-btn"
+    class:active={showStops}
+    on:click={toggleStops}
+    title="Toggle stops"
+  >
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+    >
+      <circle cx="12" cy="12" r="4"></circle>
+      <circle cx="12" cy="12" r="9" stroke-dasharray="3 3"></circle>
+    </svg>
+  </button>
 
   <Favourites
     {favourites}
@@ -83,5 +107,32 @@
 
   main {
     height: 100%;
+  }
+
+  .stops-btn {
+    position: fixed;
+    right: 10px;
+    top: 190px;
+    z-index: 1000;
+    width: 50px;
+    height: 50px;
+    border: none;
+    border-radius: 4px;
+    background: white;
+    color: #333;
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition:
+      background 0.2s,
+      color 0.2s;
+  }
+
+  .stops-btn.active {
+    background: #1a73e8;
+    color: white;
   }
 </style>

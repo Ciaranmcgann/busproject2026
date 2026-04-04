@@ -151,7 +151,7 @@
     bottom: 0;
     left: 0;
     right: 0;
-    height: 56px;
+    height: 100px;
     background: white;
     border-top: 1px solid #e0e0e0;
     z-index: 1000;
@@ -170,7 +170,7 @@
     background: #f5f5f5;
     border: none;
     border-radius: 10px;
-    padding: 10px 14px;
+    padding: 20px 14px;
     cursor: pointer;
     font-size: 14px;
     font-weight: 500;

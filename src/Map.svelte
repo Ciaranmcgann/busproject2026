@@ -7,6 +7,7 @@
   export let searchTerm = "";
   export let favourites = [];
   export let favouritesMode = false;
+  export let showStops = false;
 
   let map;
   let mapContainer;
@@ -23,6 +24,7 @@
 
   let allStops = [];
   let stopLayerGroup = null;
+  let allStopsLayerGroup = null;
 
   let lastUpdated = null;
   let timeSinceUpdate = "";
@@ -80,7 +82,6 @@
     return (toDeg(Math.atan2(y, x)) + 360) % 360;
   }
 
-  // Returns "northbound", "southbound", or "unknown"
   function getTripDirection(tripId) {
     const stops = tripStopSequence.get(tripId);
     if (!stops || stops.length < 2) return "unknown";
@@ -206,22 +207,7 @@
 
   async function fetchShapes() {
     try {
-      const [shapesRes, tripsRes] = await Promise.all([
-        fetch(`${API}/static/shapes.txt`),
-        fetch(`${API}/static/trips.json`),
-      ]);
-
-      const tripsJson = await tripsRes.json();
-      const trips = Array.isArray(tripsJson)
-        ? tripsJson
-        : tripsJson.results || [];
-
-      for (const trip of trips) {
-        if (trip.trip_id && trip.shape_id) {
-          tripShapeMap.set(trip.trip_id, trip.shape_id);
-        }
-      }
-
+      const shapesRes = await fetch(`${API}/static/shapes.txt`);
       const text = await shapesRes.text();
       const lines = text.trim().split("\n");
       const headers = lines[0].split(",").map((h) => h.trim());
@@ -250,12 +236,7 @@
         );
       });
 
-      console.log(
-        "Shapes loaded:",
-        shapePoints.size,
-        "tripShapeMap:",
-        tripShapeMap.size
-      );
+      console.log("Shapes loaded:", shapePoints.size);
     } catch (e) {
       console.warn("Could not load shapes", e);
     }
@@ -280,6 +261,13 @@
           tripToNormalizedRoute.set(trip.trip_id, normalize(shortName));
         }
       }
+
+      for (const trip of tripsArray) {
+        if (trip.trip_id && trip.shape_id) {
+          tripShapeMap.set(trip.trip_id, trip.shape_id);
+        }
+      }
+      console.log("tripShapeMap built:", tripShapeMap.size);
 
       routeStopIds = new Map();
       tripStopSequence = new Map();
@@ -402,6 +390,32 @@
     }
   }
 
+  // Shows all stops within the current viewport when showStops is on
+  function renderAllStops() {
+    if (!allStopsLayerGroup) {
+      allStopsLayerGroup = L.layerGroup().addTo(map);
+    } else {
+      allStopsLayerGroup.clearLayers();
+    }
+
+    if (!showStops) return;
+
+    const bounds = map.getBounds().pad(0.05);
+
+    allStops.forEach((stop) => {
+      const lat = parseFloat(stop.stop_lat);
+      const lng = parseFloat(stop.stop_lon);
+      if (!bounds.contains([lat, lng])) return;
+
+      const marker = L.marker([lat, lng], { icon: makeStopIcon() });
+      marker.on("click", (e) => {
+        L.DomEvent.stopPropagation(e);
+        showStopPopup(marker, stop);
+      });
+      allStopsLayerGroup.addLayer(marker);
+    });
+  }
+
   function showStopsForTrip(tripId) {
     if (stopLayerGroup) stopLayerGroup.clearLayers();
     else stopLayerGroup = L.layerGroup().addTo(map);
@@ -421,7 +435,6 @@
 
     const bounds = map.getBounds().pad(0.1);
 
-    // Build ordered list of stops with lat/lng
     const orderedStops = stopsForTrip
       .map((s) => {
         const stop = allStops.find((st) => st.stop_id === s.stop_id);
@@ -435,20 +448,35 @@
       .filter(Boolean);
 
     if (orderedStops.length >= 2) {
-      // Draw dashed connecting line through all stops
-      L.polyline(
-        orderedStops.map((s) => [s.lat, s.lng]),
-        {
-          color: lineColor,
-          weight: 3,
-          opacity: 0.6,
-          lineJoin: "round",
-          lineCap: "round",
-          dashArray: "6 4",
-        }
-      ).addTo(shapeLayerGroup);
+      const shapeId = tripShapeMap.get(tripId);
+      const shape = shapeId ? shapePoints.get(shapeId) : null;
 
-      // Draw a directional arrow at the midpoint between each pair of stops
+      if (shape && shape.length >= 2) {
+        L.polyline(
+          shape.map((p) => [p.lat, p.lng]),
+          {
+            color: lineColor,
+            weight: 3,
+            opacity: 0.6,
+            lineJoin: "round",
+            lineCap: "round",
+            dashArray: "6 4",
+          }
+        ).addTo(shapeLayerGroup);
+      } else {
+        L.polyline(
+          orderedStops.map((s) => [s.lat, s.lng]),
+          {
+            color: lineColor,
+            weight: 3,
+            opacity: 0.6,
+            lineJoin: "round",
+            lineCap: "round",
+            dashArray: "6 4",
+          }
+        ).addTo(shapeLayerGroup);
+      }
+
       for (let i = 0; i < orderedStops.length - 1; i++) {
         const from = orderedStops[i];
         const to = orderedStops[i + 1];
@@ -484,7 +512,7 @@
       }
     }
 
-    // Draw stop markers (only ones in viewport)
+    // Selected trip stop dots — always show when a bus is selected
     orderedStops.forEach((stop) => {
       if (!bounds.contains([stop.lat, stop.lng])) return;
       const marker = L.marker([stop.lat, stop.lng], { icon: makeStopIcon() });
@@ -503,14 +531,14 @@
     direction = "unknown"
   ) {
     const rotation = bearing || 0;
-    const flipped = rotation > 0 && rotation < 180;
+    const flipped = rotation > 180 && rotation < 360;
     const glowColor = direction === "northbound" ? "orange" : "#00cfff";
     const selectedFilter = `drop-shadow(0 0 0px ${glowColor}) drop-shadow(0 0 8px ${glowColor})`;
     return L.divIcon({
       className: "",
       html: `
         <div class="bus-marker-wrap" style="
-          opacity: ${dimmed ? 0.2 : 1};
+          opacity: ${dimmed ? 0.4 : 1};
           transform: ${selected ? "scale(1.4)" : "scale(1)"};
           filter: ${selected ? selectedFilter : "none"};
           transition: opacity 0.2s, filter 0.2s;
@@ -518,7 +546,7 @@
           <img
             src="${import.meta.env.BASE_URL}bus.png"
             class="bus-img"
-            style="transform: rotate(${rotation + 90}deg) ${flipped ? "scaleX(-1)" : ""};"
+            style="transform: rotate(${rotation - 90}deg) scaleX(-1) ${flipped ? "scaleY(-1)" : ""};"
           />
         </div>`,
       iconSize: [40, 40],
@@ -612,6 +640,7 @@
     }
 
     showStopsForTrip(selectedTripId);
+    renderAllStops();
   }
 
   function createMarker(bus, normalizedRoute) {
@@ -626,7 +655,6 @@
         selectedRoute = normalizedRoute;
         selectedTripId = bus.tripId;
 
-        // Fetch stop sequence on demand if not loaded yet
         if (!tripStopSequence.has(bus.tripId)) {
           try {
             const res = await fetch(`${API}/schedule/${bus.tripId}`);
@@ -661,7 +689,6 @@
         clusterGroup.clearLayers();
       }
 
-      // Remove buses no longer in the feed
       busData.forEach((entry, id) => {
         if (!incomingIds.has(id)) {
           clusterGroup.removeLayer(entry.marker);
@@ -669,7 +696,6 @@
         }
       });
 
-      // Update existing or add new buses
       newBuses.forEach((newBus) => {
         const normalizedRoute = normalize(newBus.routeName);
         const bearing = resolveBearing(newBus);
@@ -804,10 +830,8 @@
     routeNamesGlobal = routeNames;
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
 
-    // Show buses immediately — shapes loaded so bearing is correct on first render
     await refreshBuses(routeNames, false);
 
-    // Load per-trip stop sequences in background
     fetchRouteStops(routeNames).then(() => {
       applySearch();
     });
@@ -845,6 +869,7 @@
     searchTerm;
     favourites;
     favouritesMode;
+    showStops;
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(() => {
       if (map && busData.size) applySearch();
