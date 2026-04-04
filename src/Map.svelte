@@ -11,6 +11,7 @@
   export let favouritesMode = false;
   export let showStops = false;
   export let showBuses = true;
+  export let savedStops = [];
 
   let map;
   let mapContainer;
@@ -44,6 +45,11 @@
   let selectedStop = null;
   let selectedStopMarker = null;
   let incomingTripIds = new Set();
+
+  // Stop panel state
+  let stopPanelStop = null;
+  let stopPanelArrivals = [];
+  let stopPanelLoading = false;
 
   const API = "https://bus-times.ciaranjmcgann.workers.dev";
 
@@ -200,10 +206,103 @@
 
   function clearSelectedStop() {
     selectedStop = null;
+    stopPanelStop = null;
+    stopPanelArrivals = [];
     incomingTripIds = new Set();
     if (selectedStopMarker) {
+      // Reset icon back to normal before removing
+      selectedStopMarker.setIcon(makeStopIcon(false));
       map.removeLayer(selectedStopMarker);
       selectedStopMarker = null;
+    }
+  }
+
+  function isStopSaved(stopId) {
+    return savedStops.some((s) => s.stop_id === stopId);
+  }
+
+  function toggleSaveStop(stop) {
+    dispatch("toggleSavedStop", stop);
+  }
+
+  async function openStopPanel(stop) {
+    // If same stop clicked again, close it — fix for re-click issue
+    if (stopPanelStop && stopPanelStop.stop_id === stop.stop_id) {
+      clearSelectedStop();
+      applySearch();
+      return;
+    }
+
+    selectedStop = stop;
+    stopPanelStop = stop;
+    stopPanelArrivals = [];
+    stopPanelLoading = true;
+    incomingTripIds = getIncomingTripsForStop(stop.stop_id);
+    applySearch();
+
+    try {
+      const matchingTrips = [];
+
+      tripStopSequence.forEach((stops, tripId) => {
+        const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
+        if (targetIdx === -1) return;
+
+        let liveBus = null;
+        busData.forEach((bus) => {
+          if (bus.tripId === tripId) liveBus = bus;
+        });
+        if (!liveBus) return;
+
+        const busStopIdx = stops.findIndex((s) => {
+          const ll = stopLatLng.get(s.stop_id);
+          if (!ll) return false;
+          const dLat = ll.lat - liveBus.lat;
+          const dLng = ll.lng - liveBus.lng;
+          return Math.sqrt(dLat * dLat + dLng * dLng) < 0.005;
+        });
+
+        if (busStopIdx !== -1 && busStopIdx >= targetIdx) return;
+
+        const stopsRemaining =
+          busStopIdx === -1 ? targetIdx : targetIdx - busStopIdx;
+        const estMinutes = Math.round(stopsRemaining * 0.5);
+
+        matchingTrips.push({
+          tripId,
+          routeName: liveBus.routeName,
+          estMinutes,
+          type: "live",
+        });
+      });
+
+      matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
+
+      if (matchingTrips.length > 0) {
+        stopPanelArrivals = matchingTrips.slice(0, 8);
+      } else {
+        const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
+        const times = await res.json();
+        const now = new Date();
+        const nowMins = now.getHours() * 60 + now.getMinutes();
+
+        stopPanelArrivals = times
+          .map((t) => {
+            const [h, m] = t.arrival_time.split(":").map(Number);
+            return { ...t, totalMins: h * 60 + m };
+          })
+          .filter((t) => t.totalMins >= nowMins)
+          .slice(0, 8)
+          .map((t) => ({
+            routeName: t.trip_id,
+            estMinutes: t.totalMins - nowMins,
+            arrivalTime: t.arrival_time,
+            type: "scheduled",
+          }));
+      }
+    } catch (err) {
+      stopPanelArrivals = [];
+    } finally {
+      stopPanelLoading = false;
     }
   }
 
@@ -383,148 +482,14 @@
     });
   }
 
-  async function showStopPopup(marker, stop) {
-    selectedStop = stop;
-    selectedTripId = "";
-    selectedRoute = "";
-    incomingTripIds = getIncomingTripsForStop(stop.stop_id);
-    applySearch();
-
-    marker
-      .bindPopup(
-        `<div class="stop-popup">
-          <div class="stop-popup-name">${stop.stop_name}</div>
-          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-          <div class="stop-popup-empty">Loading arrivals...</div>
-        </div>`,
-        { maxWidth: 260 }
-      )
-      .openPopup();
-
-    marker.on("popupclose", () => {
-      clearSelectedStop();
-      applySearch();
-    });
-
-    try {
-      const matchingTrips = [];
-
-      tripStopSequence.forEach((stops, tripId) => {
-        const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
-        if (targetIdx === -1) return;
-
-        let liveBus = null;
-        busData.forEach((bus) => {
-          if (bus.tripId === tripId) liveBus = bus;
-        });
-        if (!liveBus) return;
-
-        const busStopIdx = stops.findIndex((s) => {
-          const ll = stopLatLng.get(s.stop_id);
-          if (!ll) return false;
-          const dLat = ll.lat - liveBus.lat;
-          const dLng = ll.lng - liveBus.lng;
-          return Math.sqrt(dLat * dLat + dLng * dLng) < 0.005;
-        });
-
-        if (busStopIdx !== -1 && busStopIdx >= targetIdx) return;
-
-        const stopsRemaining =
-          busStopIdx === -1 ? targetIdx : targetIdx - busStopIdx;
-        const estMinutes = Math.round(stopsRemaining * 0.5);
-
-        matchingTrips.push({
-          tripId,
-          routeName: liveBus.routeName,
-          estMinutes,
-        });
-      });
-
-      matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
-
-      if (matchingTrips.length === 0) {
-        const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
-        const times = await res.json();
-        const now = new Date();
-        const nowMins = now.getHours() * 60 + now.getMinutes();
-
-        const upcoming = times
-          .map((t) => {
-            const [h, m] = t.arrival_time.split(":").map(Number);
-            return { ...t, totalMins: h * 60 + m };
-          })
-          .filter((t) => t.totalMins >= nowMins)
-          .slice(0, 8);
-
-        if (upcoming.length === 0) {
-          marker.setPopupContent(`
-            <div class="stop-popup">
-              <div class="stop-popup-name">${stop.stop_name}</div>
-              <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-              <div class="stop-popup-empty">No upcoming arrivals</div>
-            </div>`);
-          return;
-        }
-
-        const rows = upcoming
-          .map((t) => {
-            const [h, m] = t.arrival_time.split(":");
-            return `<div class="stop-popup-row">
-              <span class="stop-popup-time">${h}:${m}</span>
-              <span class="stop-popup-route">${t.trip_id}</span>
-              <span class="stop-popup-badge scheduled">Scheduled</span>
-            </div>`;
-          })
-          .join("");
-
-        marker.setPopupContent(`
-          <div class="stop-popup">
-            <div class="stop-popup-name">${stop.stop_name}</div>
-            <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-            ${rows}
-          </div>`);
-        return;
-      }
-
-      const rows = matchingTrips
-        .slice(0, 8)
-        .map((t) => {
-          const label = t.estMinutes <= 1 ? "Due" : `${t.estMinutes} min`;
-          return `<div class="stop-popup-row">
-            <span class="stop-popup-time">${label}</span>
-            <span class="stop-popup-route">${t.routeName}</span>
-            <span class="stop-popup-badge live">Live</span>
-          </div>`;
-        })
-        .join("");
-
-      marker.setPopupContent(`
-        <div class="stop-popup">
-          <div class="stop-popup-name">${stop.stop_name}</div>
-          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-          ${rows}
-        </div>`);
-    } catch (err) {
-      marker.setPopupContent(`
-        <div class="stop-popup">
-          <div class="stop-popup-name">${stop.stop_name}</div>
-          <div class="stop-popup-empty">Failed to load arrivals</div>
-        </div>`);
-    }
-  }
-
   function renderAllStops() {
     if (!allStopsLayerGroup) {
       allStopsLayerGroup = L.layerGroup().addTo(map);
     }
 
-    if (!showStops) {
-      allStopsLayerGroup.clearLayers();
-      return;
-    }
+    allStopsLayerGroup.clearLayers();
 
-    // 🚨 ADD THIS
-    if (allStopsLayerGroup.getLayers().length > 0) return;
+    if (!showStops) return;
 
     const bounds = map.getBounds().pad(0.05);
 
@@ -533,11 +498,15 @@
       const lng = parseFloat(stop.stop_lon);
       if (!bounds.contains([lat, lng])) return;
 
-      const marker = L.marker([lat, lng], { icon: makeStopIcon() });
+      const isSelected =
+        stopPanelStop && stopPanelStop.stop_id === stop.stop_id;
+      const marker = L.marker([lat, lng], { icon: makeStopIcon(isSelected) });
 
       marker.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
-        showStopPopup(marker, stop);
+        // Update marker icon to green immediately
+        marker.setIcon(makeStopIcon(true));
+        openStopPanel(stop);
       });
 
       allStopsLayerGroup.addLayer(marker);
@@ -635,10 +604,15 @@
 
     orderedStops.forEach((stop) => {
       if (!bounds.contains([stop.lat, stop.lng])) return;
-      const marker = L.marker([stop.lat, stop.lng], { icon: makeStopIcon() });
+      const isSelected =
+        stopPanelStop && stopPanelStop.stop_id === stop.stop_id;
+      const marker = L.marker([stop.lat, stop.lng], {
+        icon: makeStopIcon(isSelected),
+      });
       marker.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
-        showStopPopup(marker, stop);
+        marker.setIcon(makeStopIcon(true));
+        openStopPanel(stop);
       });
       stopLayerGroup.addLayer(marker);
     });
@@ -911,15 +885,12 @@
     selectedStopMarker = L.marker([lat, lng], {
       icon: makeStopIcon(true),
     }).addTo(map);
-    showStopPopup(selectedStopMarker, stop);
 
-    selectedStopMarker.on("popupclose", () => {
-      clearSelectedStop();
-      applySearch();
-      if (selectedStopMarker) {
-        map.removeLayer(selectedStopMarker);
-        selectedStopMarker = null;
-      }
+    openStopPanel(stop);
+
+    selectedStopMarker.on("click", (e) => {
+      L.DomEvent.stopPropagation(e);
+      openStopPanel(stop);
     });
   }
 
@@ -1066,6 +1037,83 @@
   </div>
 {/if}
 
+<!-- Stop arrivals panel — slides up above the footer -->
+{#if stopPanelStop}
+  <div class="stop-panel">
+    <div class="stop-panel-header">
+      <div class="stop-panel-title">
+        <span class="stop-panel-name">{stopPanelStop.stop_name}</span>
+        <span class="stop-panel-code">Stop {stopPanelStop.stop_code}</span>
+      </div>
+      <div class="stop-panel-actions">
+        <button
+          class="save-stop-btn"
+          class:saved={isStopSaved(stopPanelStop.stop_id)}
+          on:click|stopPropagation={() => toggleSaveStop(stopPanelStop)}
+        >
+          {#if isStopSaved(stopPanelStop.stop_id)}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path
+                d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+              />
+            </svg>
+            Saved
+          {:else}
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
+              ></path>
+            </svg>
+            Save stop
+          {/if}
+        </button>
+        <button
+          class="stop-panel-close"
+          on:click={() => {
+            clearSelectedStop();
+            applySearch();
+          }}>✕</button
+        >
+      </div>
+    </div>
+
+    <div class="stop-panel-body">
+      {#if stopPanelLoading}
+        <div class="stop-panel-empty">Loading arrivals...</div>
+      {:else if stopPanelArrivals.length === 0}
+        <div class="stop-panel-empty">No upcoming arrivals</div>
+      {:else}
+        {#each stopPanelArrivals as arrival}
+          <div class="stop-panel-row">
+            <span class="stop-panel-time">
+              {arrival.type === "live"
+                ? arrival.estMinutes <= 1
+                  ? "Due"
+                  : `${arrival.estMinutes} min`
+                : (arrival.arrivalTime?.slice(0, 5) ?? "—")}
+            </span>
+            <span class="stop-panel-route">{arrival.routeName}</span>
+            <span
+              class="stop-panel-badge"
+              class:live={arrival.type === "live"}
+              class:scheduled={arrival.type === "scheduled"}
+            >
+              {arrival.type === "live" ? "Live" : "Scheduled"}
+            </span>
+          </div>
+        {/each}
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <button class="locate-btn" on:click={locateMe}>
   <svg
     width="20"
@@ -1116,6 +1164,136 @@
   .map {
     width: 100%;
     height: 100%;
+  }
+
+  /* Stop arrivals panel */
+  .stop-panel {
+    position: fixed;
+    bottom: 60px; /* sits above the footer */
+    left: 0;
+    right: 0;
+    z-index: 1100;
+    background: white;
+    border-top: 1px solid #e0e0e0;
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.15);
+    max-height: 260px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .stop-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px 8px;
+    border-bottom: 1px solid #f0f0f0;
+    flex-shrink: 0;
+  }
+
+  .stop-panel-title {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .stop-panel-name {
+    font-weight: 700;
+    font-size: 14px;
+    color: #111;
+  }
+
+  .stop-panel-code {
+    font-size: 11px;
+    color: #888;
+  }
+
+  .stop-panel-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .save-stop-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 20px;
+    border: 1.5px solid #1a73e8;
+    background: transparent;
+    color: #1a73e8;
+    cursor: pointer;
+    transition:
+      background 0.15s,
+      color 0.15s;
+  }
+
+  .save-stop-btn.saved {
+    background: #1a73e8;
+    color: white;
+  }
+
+  .stop-panel-close {
+    background: none;
+    border: none;
+    font-size: 16px;
+    color: #888;
+    cursor: pointer;
+    padding: 4px;
+    line-height: 1;
+  }
+
+  .stop-panel-body {
+    overflow-y: auto;
+    flex: 1;
+    padding: 4px 0 8px;
+  }
+
+  .stop-panel-empty {
+    font-size: 13px;
+    color: #999;
+    padding: 12px 16px;
+  }
+
+  .stop-panel-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    border-bottom: 1px solid #f8f8f8;
+    font-size: 13px;
+  }
+
+  .stop-panel-time {
+    font-weight: 700;
+    color: #1a73e8;
+    min-width: 48px;
+  }
+
+  .stop-panel-route {
+    flex: 1;
+    color: #333;
+  }
+
+  .stop-panel-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 10px;
+    text-transform: uppercase;
+  }
+
+  .stop-panel-badge.live {
+    background: #e8f5e9;
+    color: #2e7d32;
+  }
+
+  .stop-panel-badge.scheduled {
+    background: #e3f2fd;
+    color: #1565c0;
   }
 
   :global(.bus-marker-wrap) {
@@ -1173,73 +1351,6 @@
     border: 2px solid white;
     border-radius: 50%;
     box-shadow: 0 0 8px rgba(0, 230, 118, 0.8);
-  }
-
-  :global(.stop-popup) {
-    font-family: system-ui, sans-serif;
-    min-width: 180px;
-  }
-
-  :global(.stop-popup-name) {
-    font-weight: 700;
-    font-size: 14px;
-    margin-bottom: 2px;
-  }
-
-  :global(.stop-popup-code) {
-    font-size: 11px;
-    color: #888;
-    margin-bottom: 8px;
-  }
-
-  :global(.stop-popup-row) {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 4px 0;
-    border-top: 1px solid #f0f0f0;
-    font-size: 13px;
-  }
-
-  :global(.stop-popup-time) {
-    font-weight: 700;
-    color: #1a73e8;
-    min-width: 42px;
-  }
-
-  :global(.stop-popup-route) {
-    color: #555;
-    font-size: 12px;
-    flex: 1;
-  }
-
-  :global(.stop-popup-trip) {
-    color: #555;
-    font-size: 12px;
-  }
-
-  :global(.stop-popup-empty) {
-    font-size: 13px;
-    color: #999;
-    padding: 4px 0;
-  }
-
-  :global(.stop-popup-badge) {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 2px 6px;
-    border-radius: 10px;
-    text-transform: uppercase;
-  }
-
-  :global(.stop-popup-badge.live) {
-    background: #e8f5e9;
-    color: #2e7d32;
-  }
-
-  :global(.stop-popup-badge.scheduled) {
-    background: #e3f2fd;
-    color: #1565c0;
   }
 
   .locate-btn,
