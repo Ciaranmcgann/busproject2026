@@ -1,13 +1,16 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, createEventDispatcher } from "svelte";
   import L from "leaflet";
   import "leaflet.markercluster";
   import protobuf from "protobufjs";
+
+  const dispatch = createEventDispatcher();
 
   export let searchTerm = "";
   export let favourites = [];
   export let favouritesMode = false;
   export let showStops = false;
+  export let showBuses = true;
 
   let map;
   let mapContainer;
@@ -37,6 +40,10 @@
   let stopLatLng = new Map();
   let shouldAutoFit = false;
   let selectedTripId = "";
+
+  let selectedStop = null;
+  let selectedStopMarker = null;
+  let incomingTripIds = new Set();
 
   const API = "https://bus-times.ciaranjmcgann.workers.dev";
 
@@ -162,6 +169,44 @@
     return 0;
   }
 
+  function getIncomingTripsForStop(stopId) {
+    const result = new Set();
+
+    tripStopSequence.forEach((stops, tripId) => {
+      const targetIdx = stops.findIndex((s) => s.stop_id === stopId);
+      if (targetIdx === -1) return;
+
+      let liveBus = null;
+      busData.forEach((bus) => {
+        if (bus.tripId === tripId) liveBus = bus;
+      });
+      if (!liveBus) return;
+
+      const busStopIdx = stops.findIndex((s) => {
+        const ll = stopLatLng.get(s.stop_id);
+        if (!ll) return false;
+        const dLat = ll.lat - liveBus.lat;
+        const dLng = ll.lng - liveBus.lng;
+        return Math.sqrt(dLat * dLat + dLng * dLng) < 0.005;
+      });
+
+      if (busStopIdx === -1 || busStopIdx < targetIdx) {
+        result.add(tripId);
+      }
+    });
+
+    return result;
+  }
+
+  function clearSelectedStop() {
+    selectedStop = null;
+    incomingTripIds = new Set();
+    if (selectedStopMarker) {
+      map.removeLayer(selectedStopMarker);
+      selectedStopMarker = null;
+    }
+  }
+
   async function fetchRouteNames() {
     try {
       const res = await fetch(`${API}/routes`);
@@ -200,6 +245,8 @@
           });
         }
       }
+
+      dispatch("stopsLoaded", allStops);
     } catch (e) {
       console.warn("Could not load stops", e);
     }
@@ -235,11 +282,27 @@
           points.sort((a, b) => a.seq - b.seq)
         );
       });
-
-      console.log("Shapes loaded:", shapePoints.size);
     } catch (e) {
       console.warn("Could not load shapes", e);
     }
+  }
+
+  async function fetchTripSchedule(tripId) {
+    const cacheKey = `trip-${tripId}`;
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) return JSON.parse(cached);
+    } catch (_) {}
+
+    const res = await fetch(`${API}/schedule/${tripId}`);
+    if (!res.ok) return null;
+    const stops = await res.json();
+
+    try {
+      sessionStorage.setItem(cacheKey, JSON.stringify(stops));
+    } catch (_) {}
+
+    return stops;
   }
 
   async function fetchRouteStops(routeNames) {
@@ -257,107 +320,105 @@
       const tripToNormalizedRoute = new Map();
       for (const trip of tripsArray) {
         const shortName = routeNames[trip.route_id?.trim()];
-        if (shortName) {
+        if (shortName)
           tripToNormalizedRoute.set(trip.trip_id, normalize(shortName));
-        }
-      }
-
-      for (const trip of tripsArray) {
-        if (trip.trip_id && trip.shape_id) {
+        if (trip.trip_id && trip.shape_id)
           tripShapeMap.set(trip.trip_id, trip.shape_id);
-        }
       }
-      console.log("tripShapeMap built:", tripShapeMap.size);
 
       routeStopIds = new Map();
       tripStopSequence = new Map();
 
-      const activeTripIds = new Set(
-        buses
-          .map((b) => b.tripId)
-          .filter((id) => id && tripToNormalizedRoute.has(id))
-      );
+      const activeTripIds = [
+        ...new Set(
+          buses
+            .map((b) => b.tripId)
+            .filter((id) => id && tripToNormalizedRoute.has(id))
+        ),
+      ];
 
-      console.log("Active trips:", activeTripIds.size);
+      const CONCURRENCY = 10;
+      for (let i = 0; i < activeTripIds.length; i += CONCURRENCY) {
+        const batch = activeTripIds.slice(i, i + CONCURRENCY);
+        await Promise.all(
+          batch.map(async (tripId) => {
+            try {
+              const stops = await fetchTripSchedule(tripId);
+              if (!stops || !stops.length) return;
 
-      for (const tripId of activeTripIds) {
-        try {
-          const res = await fetch(`${API}/schedule/${tripId}`);
-          if (!res.ok) continue;
+              const normalizedRoute = tripToNormalizedRoute.get(tripId);
+              if (!normalizedRoute) return;
 
-          const stops = await res.json();
-          if (!stops.length) continue;
+              if (!routeStopIds.has(normalizedRoute))
+                routeStopIds.set(normalizedRoute, new Set());
 
-          const normalizedRoute = tripToNormalizedRoute.get(tripId);
-          if (!normalizedRoute) continue;
+              const orderedStops = stops
+                .map((s) => ({
+                  stop_id: s.stop_id,
+                  seq: parseInt(s.stop_sequence),
+                }))
+                .sort((a, b) => a.seq - b.seq);
 
-          if (!routeStopIds.has(normalizedRoute)) {
-            routeStopIds.set(normalizedRoute, new Set());
-          }
-
-          const orderedStops = stops
-            .map((s) => ({
-              stop_id: s.stop_id,
-              seq: parseInt(s.stop_sequence),
-            }))
-            .sort((a, b) => a.seq - b.seq);
-
-          tripStopSequence.set(tripId, orderedStops);
-
-          for (const s of orderedStops) {
-            routeStopIds.get(normalizedRoute).add(s.stop_id);
-          }
-        } catch (err) {
-          console.warn(`Failed trip ${tripId}`, err);
-        }
+              tripStopSequence.set(tripId, orderedStops);
+              for (const s of orderedStops)
+                routeStopIds.get(normalizedRoute).add(s.stop_id);
+            } catch (err) {
+              console.warn(`Failed trip ${tripId}`, err);
+            }
+          })
+        );
       }
-
-      console.log("✅ Route stops loaded:", routeStopIds.size);
-      console.log("✅ Trip sequences loaded:", tripStopSequence.size);
     } catch (e) {
-      console.warn("❌ Could not load route stops", e);
+      console.warn("Could not load route stops", e);
     }
   }
 
-  function makeStopIcon() {
+  function makeStopIcon(highlighted = false) {
     return L.divIcon({
       className: "",
-      html: `<div class="stop-marker"></div>`,
-      iconSize: [12, 12],
-      iconAnchor: [6, 6],
+      html: `<div class="stop-marker${highlighted ? " stop-marker-highlighted" : ""}"></div>`,
+      iconSize: highlighted ? [18, 18] : [12, 12],
+      iconAnchor: highlighted ? [9, 9] : [6, 6],
       popupAnchor: [0, -8],
     });
   }
 
   async function showStopPopup(marker, stop) {
+    selectedStop = stop;
+    selectedTripId = "";
+    selectedRoute = "";
+    incomingTripIds = getIncomingTripsForStop(stop.stop_id);
+    applySearch();
+
     marker
       .bindPopup(
         `<div class="stop-popup">
-        <div class="stop-popup-name">${stop.stop_name}</div>
-        <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-        <div class="stop-popup-empty">Loading arrivals...</div>
-      </div>`,
+          <div class="stop-popup-name">${stop.stop_name}</div>
+          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+          <div class="stop-popup-empty">Loading arrivals...</div>
+        </div>`,
         { maxWidth: 260 }
       )
       .openPopup();
 
+    marker.on("popupclose", () => {
+      clearSelectedStop();
+      applySearch();
+    });
+
     try {
-      // 1. Find all trips that serve this stop
       const matchingTrips = [];
 
       tripStopSequence.forEach((stops, tripId) => {
-        const stopEntry = stops.find((s) => s.stop_id === stop.stop_id);
-        if (!stopEntry) return;
+        const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
+        if (targetIdx === -1) return;
 
-        // 2. Check if there's a live bus on this trip
         let liveBus = null;
         busData.forEach((bus) => {
           if (bus.tripId === tripId) liveBus = bus;
         });
-
         if (!liveBus) return;
 
-        // 3. Find how far through the trip the bus is
         const busStopIdx = stops.findIndex((s) => {
           const ll = stopLatLng.get(s.stop_id);
           if (!ll) return false;
@@ -366,12 +427,8 @@
           return Math.sqrt(dLat * dLat + dLng * dLng) < 0.005;
         });
 
-        const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
-
-        // Only show if bus hasn't passed this stop yet
         if (busStopIdx !== -1 && busStopIdx >= targetIdx) return;
 
-        // 4. Estimate arrival: ~30 seconds per stop remaining
         const stopsRemaining =
           busStopIdx === -1 ? targetIdx : targetIdx - busStopIdx;
         const estMinutes = Math.round(stopsRemaining * 0.5);
@@ -380,14 +437,12 @@
           tripId,
           routeName: liveBus.routeName,
           estMinutes,
-          stopsRemaining,
         });
       });
 
       matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
 
       if (matchingTrips.length === 0) {
-        // Fall back to scheduled times
         const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
         const times = await res.json();
         const now = new Date();
@@ -403,11 +458,11 @@
 
         if (upcoming.length === 0) {
           marker.setPopupContent(`
-          <div class="stop-popup">
-            <div class="stop-popup-name">${stop.stop_name}</div>
-            <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-            <div class="stop-popup-empty">No upcoming arrivals</div>
-          </div>`);
+            <div class="stop-popup">
+              <div class="stop-popup-name">${stop.stop_name}</div>
+              <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+              <div class="stop-popup-empty">No upcoming arrivals</div>
+            </div>`);
           return;
         }
 
@@ -415,59 +470,61 @@
           .map((t) => {
             const [h, m] = t.arrival_time.split(":");
             return `<div class="stop-popup-row">
-            <span class="stop-popup-time">${h}:${m}</span>
-            <span class="stop-popup-route">${t.trip_id}</span>
-            <span class="stop-popup-badge scheduled">Scheduled</span>
-          </div>`;
+              <span class="stop-popup-time">${h}:${m}</span>
+              <span class="stop-popup-route">${t.trip_id}</span>
+              <span class="stop-popup-badge scheduled">Scheduled</span>
+            </div>`;
           })
           .join("");
 
         marker.setPopupContent(`
-        <div class="stop-popup">
-          <div class="stop-popup-name">${stop.stop_name}</div>
-          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-          ${rows}
-        </div>`);
+          <div class="stop-popup">
+            <div class="stop-popup-name">${stop.stop_name}</div>
+            <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+            ${rows}
+          </div>`);
         return;
       }
 
-      // 5. Show live arrivals
       const rows = matchingTrips
         .slice(0, 8)
         .map((t) => {
           const label = t.estMinutes <= 1 ? "Due" : `${t.estMinutes} min`;
           return `<div class="stop-popup-row">
-          <span class="stop-popup-time">${label}</span>
-          <span class="stop-popup-route">${t.routeName}</span>
-          <span class="stop-popup-badge live">Live</span>
-        </div>`;
+            <span class="stop-popup-time">${label}</span>
+            <span class="stop-popup-route">${t.routeName}</span>
+            <span class="stop-popup-badge live">Live</span>
+          </div>`;
         })
         .join("");
 
       marker.setPopupContent(`
-      <div class="stop-popup">
-        <div class="stop-popup-name">${stop.stop_name}</div>
-        <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-        ${rows}
-      </div>`);
+        <div class="stop-popup">
+          <div class="stop-popup-name">${stop.stop_name}</div>
+          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+          ${rows}
+        </div>`);
     } catch (err) {
       marker.setPopupContent(`
-      <div class="stop-popup">
-        <div class="stop-popup-name">${stop.stop_name}</div>
-        <div class="stop-popup-empty">Failed to load arrivals</div>
-      </div>`);
+        <div class="stop-popup">
+          <div class="stop-popup-name">${stop.stop_name}</div>
+          <div class="stop-popup-empty">Failed to load arrivals</div>
+        </div>`);
     }
   }
 
-  // Shows all stops within the current viewport when showStops is on
   function renderAllStops() {
     if (!allStopsLayerGroup) {
       allStopsLayerGroup = L.layerGroup().addTo(map);
-    } else {
-      allStopsLayerGroup.clearLayers();
     }
 
-    if (!showStops) return;
+    if (!showStops) {
+      allStopsLayerGroup.clearLayers();
+      return;
+    }
+
+    // 🚨 ADD THIS
+    if (allStopsLayerGroup.getLayers().length > 0) return;
 
     const bounds = map.getBounds().pad(0.05);
 
@@ -477,10 +534,12 @@
       if (!bounds.contains([lat, lng])) return;
 
       const marker = L.marker([lat, lng], { icon: makeStopIcon() });
+
       marker.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
         showStopPopup(marker, stop);
       });
+
       allStopsLayerGroup.addLayer(marker);
     });
   }
@@ -555,19 +614,12 @@
 
         const arrowIcon = L.divIcon({
           className: "",
-          html: `<svg
-            width="20" height="20"
-            viewBox="0 0 20 20"
+          html: `<svg width="20" height="20" viewBox="0 0 20 20"
             style="transform: rotate(${bearing}deg); display: block;"
             xmlns="http://www.w3.org/2000/svg">
-            <polygon
-              points="10,2 17,16 10,12 3,16"
-              fill="${arrowColor}"
-              fill-opacity="0.9"
-              stroke="white"
-              stroke-width="1.5"
-              stroke-linejoin="round"
-            />
+            <polygon points="10,2 17,16 10,12 3,16"
+              fill="${arrowColor}" fill-opacity="0.9"
+              stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
           </svg>`,
           iconSize: [20, 20],
           iconAnchor: [10, 10],
@@ -581,7 +633,6 @@
       }
     }
 
-    // Selected trip stop dots — always show when a bus is selected
     orderedStops.forEach((stop) => {
       if (!bounds.contains([stop.lat, stop.lng])) return;
       const marker = L.marker([stop.lat, stop.lng], { icon: makeStopIcon() });
@@ -597,19 +648,24 @@
     bearing,
     dimmed = false,
     selected = false,
+    highlighted = false,
     direction = "unknown"
   ) {
     const rotation = bearing || 0;
     const flipped = rotation > 180 && rotation < 360;
-    const glowColor = direction === "northbound" ? "orange" : "#00cfff";
+    const glowColor = highlighted
+      ? "#00e676"
+      : direction === "northbound"
+        ? "orange"
+        : "#00cfff";
     const selectedFilter = `drop-shadow(0 0 0px ${glowColor}) drop-shadow(0 0 8px ${glowColor})`;
     return L.divIcon({
       className: "",
       html: `
         <div class="bus-marker-wrap" style="
-          opacity: ${dimmed ? 0.4 : 1};
-          transform: ${selected ? "scale(1.4)" : "scale(1)"};
-          filter: ${selected ? selectedFilter : "none"};
+          opacity: ${dimmed ? 0.2 : 1};
+          transform: ${selected || highlighted ? "scale(1.4)" : "scale(1)"};
+          filter: ${selected || highlighted ? selectedFilter : "none"};
           transition: opacity 0.2s, filter 0.2s;
         ">
           <img
@@ -667,6 +723,7 @@
       !favouritesMode || favourites.includes(normalizedRoute);
     return matchesSearch && matchesFavourites;
   }
+
   function isNearViewport(lat, lng) {
     const bounds = map.getBounds().pad(0.3);
     return bounds.contains([lat, lng]);
@@ -676,10 +733,22 @@
     if (!map || !clusterGroup) return;
 
     const visibleMarkers = [];
+    const hasSelectedStop = selectedStop !== null;
+    const hasSelectedRoute = !!selectedRoute;
 
     busData.forEach((bus) => {
-      const visible = shouldShow(bus.normalizedRoute);
+      const visible = showBuses && shouldShow(bus.normalizedRoute);
       const inViewport = isNearViewport(bus.lat, bus.lng);
+      const isIncoming = incomingTripIds.has(bus.tripId);
+      const isSelectedBus =
+        hasSelectedRoute && bus.normalizedRoute === normalize(selectedRoute);
+
+      let dimmed = false;
+      if (hasSelectedStop) {
+        dimmed = !isIncoming;
+      } else if (hasSelectedRoute) {
+        dimmed = !isSelectedBus;
+      }
 
       if (visible && inViewport) {
         if (!clusterGroup.hasLayer(bus.marker)) {
@@ -692,12 +761,15 @@
         }
       }
 
-      const isSelected =
-        selectedRoute && bus.normalizedRoute === normalize(selectedRoute);
-      const isDimmed = selectedRoute && !isSelected;
       const direction = getTripDirection(bus.tripId);
       bus.marker.setIcon(
-        makeBusIcon(bus.bearing, isDimmed, isSelected, direction)
+        makeBusIcon(
+          bus.bearing,
+          dimmed,
+          isSelectedBus,
+          isIncoming && hasSelectedStop,
+          direction
+        )
       );
     });
 
@@ -720,14 +792,14 @@
       })
       .on("click", async (e) => {
         L.DomEvent.stopPropagation(e);
+        clearSelectedStop();
         selectedRoute = normalizedRoute;
         selectedTripId = bus.tripId;
 
         if (!tripStopSequence.has(bus.tripId)) {
           try {
-            const res = await fetch(`${API}/schedule/${bus.tripId}`);
-            if (res.ok) {
-              const stops = await res.json();
+            const stops = await fetchTripSchedule(bus.tripId);
+            if (stops) {
               const ordered = stops
                 .map((s) => ({
                   stop_id: s.stop_id,
@@ -776,12 +848,22 @@
           entry.tripId = newBus.tripId;
           entry.normalizedRoute = normalizedRoute;
           entry.marker.setLatLng([newBus.lat, newBus.lng]);
-          const isSelected =
+          const isIncoming = incomingTripIds.has(newBus.tripId);
+          const hasSelectedStop = selectedStop !== null;
+          const isSelectedBus =
             selectedRoute && normalizedRoute === normalize(selectedRoute);
-          const isDimmed = selectedRoute && !isSelected;
+          let dimmed = false;
+          if (hasSelectedStop) dimmed = !isIncoming;
+          else if (selectedRoute) dimmed = !isSelectedBus;
           const direction = getTripDirection(newBus.tripId);
           entry.marker.setIcon(
-            makeBusIcon(bearing, isDimmed, isSelected, direction)
+            makeBusIcon(
+              bearing,
+              dimmed,
+              isSelectedBus,
+              isIncoming && hasSelectedStop,
+              direction
+            )
           );
         } else {
           const marker = createMarker({ ...newBus, bearing }, normalizedRoute);
@@ -800,6 +882,10 @@
         lastUpdated = feedTimestamp;
       }
 
+      if (selectedStop) {
+        incomingTripIds = getIncomingTripsForStop(selectedStop.stop_id);
+      }
+
       updateTimer();
       applySearch();
     } catch (err) {
@@ -813,6 +899,28 @@
     if (locationMarker) {
       map.setView(locationMarker.getLatLng(), 17);
     }
+  }
+
+  export function jumpToStop(stop) {
+    const lat = parseFloat(stop.stop_lat);
+    const lng = parseFloat(stop.stop_lon);
+    map.setView([lat, lng], 17);
+
+    if (selectedStopMarker) map.removeLayer(selectedStopMarker);
+
+    selectedStopMarker = L.marker([lat, lng], {
+      icon: makeStopIcon(true),
+    }).addTo(map);
+    showStopPopup(selectedStopMarker, stop);
+
+    selectedStopMarker.on("popupclose", () => {
+      clearSelectedStop();
+      applySearch();
+      if (selectedStopMarker) {
+        map.removeLayer(selectedStopMarker);
+        selectedStopMarker = null;
+      }
+    });
   }
 
   let routeNamesGlobal = {};
@@ -871,6 +979,7 @@
     map.on("click", () => {
       selectedRoute = "";
       selectedTripId = "";
+      clearSelectedStop();
       if (shapeLayerGroup) shapeLayerGroup.clearLayers();
       if (stopLayerGroup) stopLayerGroup.clearLayers();
       applySearch();
@@ -891,8 +1000,6 @@
     const [root, routeNames] = await Promise.all([
       protobuf.load(protoUrl),
       fetchRouteNames(),
-      fetchStops(),
-      fetchShapes(),
     ]);
 
     routeNamesGlobal = routeNames;
@@ -900,8 +1007,8 @@
 
     await refreshBuses(routeNames, false);
 
-    fetchRouteStops(routeNames).then(() => {
-      applySearch();
+    Promise.all([fetchStops(), fetchShapes()]).then(() => {
+      fetchRouteStops(routeNames).then(() => applySearch());
     });
 
     setInterval(() => refreshBuses(routeNames, true), 15000);
@@ -938,6 +1045,7 @@
     favourites;
     favouritesMode;
     showStops;
+    showBuses;
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(() => {
       if (map && busData.size) applySearch();
@@ -1058,6 +1166,15 @@
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   }
 
+  :global(.stop-marker-highlighted) {
+    width: 18px;
+    height: 18px;
+    background: #00e676;
+    border: 2px solid white;
+    border-radius: 50%;
+    box-shadow: 0 0 8px rgba(0, 230, 118, 0.8);
+  }
+
   :global(.stop-popup) {
     font-family: system-ui, sans-serif;
     min-width: 180px;
@@ -1090,6 +1207,12 @@
     min-width: 42px;
   }
 
+  :global(.stop-popup-route) {
+    color: #555;
+    font-size: 12px;
+    flex: 1;
+  }
+
   :global(.stop-popup-trip) {
     color: #555;
     font-size: 12px;
@@ -1099,6 +1222,24 @@
     font-size: 13px;
     color: #999;
     padding: 4px 0;
+  }
+
+  :global(.stop-popup-badge) {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 10px;
+    text-transform: uppercase;
+  }
+
+  :global(.stop-popup-badge.live) {
+    background: #e8f5e9;
+    color: #2e7d32;
+  }
+
+  :global(.stop-popup-badge.scheduled) {
+    background: #e3f2fd;
+    color: #1565c0;
   }
 
   .locate-btn,
@@ -1173,29 +1314,5 @@
     to {
       transform: rotate(360deg);
     }
-  }
-
-  :global(.stop-popup-route) {
-    color: #555;
-    font-size: 12px;
-    flex: 1;
-  }
-
-  :global(.stop-popup-badge) {
-    font-size: 10px;
-    font-weight: 700;
-    padding: 2px 6px;
-    border-radius: 10px;
-    text-transform: uppercase;
-  }
-
-  :global(.stop-popup-badge.live) {
-    background: #e8f5e9;
-    color: #2e7d32;
-  }
-
-  :global(.stop-popup-badge.scheduled) {
-    background: #e3f2fd;
-    color: #1565c0;
   }
 </style>

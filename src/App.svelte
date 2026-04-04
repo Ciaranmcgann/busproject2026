@@ -6,13 +6,21 @@
 
   let searchTerm = "";
   let routes = [];
+  let mapRef;
+  let favouritesRef;
+  let allStops = [];
 
   let favourites = JSON.parse(localStorage.getItem("bus-favourites") || "[]");
   let favouritesMode = localStorage.getItem("bus-favourites-mode") === "true";
   let showStops = false;
+  let showBuses = true;
 
   function handleSearch(event) {
     searchTerm = event.detail;
+  }
+
+  function handleStopsLoaded(e) {
+    allStops = e.detail;
   }
 
   async function loadRoutes() {
@@ -48,6 +56,14 @@
     showStops = !showStops;
   }
 
+  function toggleBuses() {
+    showBuses = !showBuses;
+  }
+
+  function handleJumpToStop(e) {
+    mapRef?.jumpToStop(e.detail);
+  }
+
   onMount(loadRoutes);
 </script>
 
@@ -56,11 +72,14 @@
 
   <main>
     <Map
+      bind:this={mapRef}
       {searchTerm}
       {favourites}
       {favouritesMode}
       {showStops}
+      {showBuses}
       on:addFavourite={(e) => toggleFavourite(e.detail)}
+      on:stopsLoaded={handleStopsLoaded}
     />
   </main>
 
@@ -83,12 +102,36 @@
     </svg>
   </button>
 
+  <button
+    class="buses-btn"
+    class:active={showBuses}
+    on:click={toggleBuses}
+    title="Toggle buses"
+  >
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+    >
+      <rect x="1" y="3" width="15" height="13" rx="2"></rect>
+      <path d="M16 8h4l3 5v3h-7V8z"></path>
+      <circle cx="5.5" cy="18.5" r="2.5"></circle>
+      <circle cx="18.5" cy="18.5" r="2.5"></circle>
+    </svg>
+  </button>
+
   <Favourites
+    bind:this={favouritesRef}
     {favourites}
     {favouritesMode}
     allRoutes={routes}
+    {allStops}
     on:toggleFavourite={(e) => toggleFavourite(e.detail)}
     on:toggleMode={toggleMode}
+    on:jumpToStop={handleJumpToStop}
   />
 </div>
 
@@ -109,10 +152,10 @@
     height: 100%;
   }
 
-  .stops-btn {
+  .stops-btn,
+  .buses-btn {
     position: fixed;
     right: 10px;
-    top: 190px;
     z-index: 1000;
     width: 50px;
     height: 50px;
@@ -131,7 +174,16 @@
       color 0.2s;
   }
 
-  .stops-btn.active {
+  .stops-btn {
+    top: 190px;
+  }
+
+  .buses-btn {
+    top: 250px;
+  }
+
+  .stops-btn.active,
+  .buses-btn.active {
     background: #1a73e8;
     color: white;
   }
