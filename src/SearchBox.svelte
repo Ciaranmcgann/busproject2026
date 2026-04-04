@@ -18,15 +18,12 @@
 
   function getSuggestions(term) {
     const normalizedTerm = normalize(term);
-
     const uniqueRoutes = [...new Set(allRoutes)];
 
-    // Prefix matches first (better UX)
     const prefixMatches = uniqueRoutes.filter((r) =>
       normalize(r).startsWith(normalizedTerm)
     );
 
-    // Then partial matches (fallback)
     const partialMatches = uniqueRoutes.filter(
       (r) =>
         !normalize(r).startsWith(normalizedTerm) &&
@@ -38,16 +35,18 @@
 
   function handleInput() {
     const term = value;
-    dispatch("search", term);
-
     activeIndex = -1;
 
     if (!term.trim()) {
       suggestions = [];
+      dispatch("search", "");
       return;
     }
 
     suggestions = getSuggestions(term);
+
+    const exactMatch = allRoutes.find((r) => normalize(r) === normalize(term));
+    dispatch("search", exactMatch ?? "");
   }
 
   function selectSuggestion(s) {
@@ -125,7 +124,6 @@
     border: 1px solid #ddd;
     font-size: 16px;
     outline: none;
-
     box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
     font-family:
       system-ui,
@@ -150,7 +148,6 @@
     overflow-y: auto;
     padding: 6px 0;
     list-style: none;
-
     font-family:
       system-ui,
       -apple-system,
@@ -159,7 +156,6 @@
       Roboto,
       Arial,
       sans-serif;
-
     animation: fadeIn 0.15s ease;
   }
 
@@ -168,7 +164,6 @@
     cursor: pointer;
     font-size: 14px;
     color: #333;
-
     transition:
       background 0.15s ease,
       color 0.15s ease;

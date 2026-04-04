@@ -333,60 +333,129 @@
     marker
       .bindPopup(
         `<div class="stop-popup">
-          <div class="stop-popup-name">${stop.stop_name}</div>
-          <div class="stop-popup-code">Stop ${stop.stop_code}</div>
-          <div class="stop-popup-empty">Loading arrivals...</div>
-        </div>`,
+        <div class="stop-popup-name">${stop.stop_name}</div>
+        <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+        <div class="stop-popup-empty">Loading arrivals...</div>
+      </div>`,
         { maxWidth: 260 }
       )
       .openPopup();
 
     try {
-      const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
-      const times = await res.json();
+      // 1. Find all trips that serve this stop
+      const matchingTrips = [];
 
-      const now = new Date();
-      const nowMins = now.getHours() * 60 + now.getMinutes();
+      tripStopSequence.forEach((stops, tripId) => {
+        const stopEntry = stops.find((s) => s.stop_id === stop.stop_id);
+        if (!stopEntry) return;
 
-      const upcoming = times
-        .filter((t) => {
-          const [h, m] = t.arrival_time.split(":").map(Number);
-          return h * 60 + m >= nowMins;
-        })
-        .slice(0, 8);
+        // 2. Check if there's a live bus on this trip
+        let liveBus = null;
+        busData.forEach((bus) => {
+          if (bus.tripId === tripId) liveBus = bus;
+        });
 
-      if (upcoming.length === 0) {
-        marker.setPopupContent(`
+        if (!liveBus) return;
+
+        // 3. Find how far through the trip the bus is
+        const busStopIdx = stops.findIndex((s) => {
+          const ll = stopLatLng.get(s.stop_id);
+          if (!ll) return false;
+          const dLat = ll.lat - liveBus.lat;
+          const dLng = ll.lng - liveBus.lng;
+          return Math.sqrt(dLat * dLat + dLng * dLng) < 0.005;
+        });
+
+        const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
+
+        // Only show if bus hasn't passed this stop yet
+        if (busStopIdx !== -1 && busStopIdx >= targetIdx) return;
+
+        // 4. Estimate arrival: ~30 seconds per stop remaining
+        const stopsRemaining =
+          busStopIdx === -1 ? targetIdx : targetIdx - busStopIdx;
+        const estMinutes = Math.round(stopsRemaining * 0.5);
+
+        matchingTrips.push({
+          tripId,
+          routeName: liveBus.routeName,
+          estMinutes,
+          stopsRemaining,
+        });
+      });
+
+      matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
+
+      if (matchingTrips.length === 0) {
+        // Fall back to scheduled times
+        const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
+        const times = await res.json();
+        const now = new Date();
+        const nowMins = now.getHours() * 60 + now.getMinutes();
+
+        const upcoming = times
+          .map((t) => {
+            const [h, m] = t.arrival_time.split(":").map(Number);
+            return { ...t, totalMins: h * 60 + m };
+          })
+          .filter((t) => t.totalMins >= nowMins)
+          .slice(0, 8);
+
+        if (upcoming.length === 0) {
+          marker.setPopupContent(`
           <div class="stop-popup">
             <div class="stop-popup-name">${stop.stop_name}</div>
             <div class="stop-popup-code">Stop ${stop.stop_code}</div>
             <div class="stop-popup-empty">No upcoming arrivals</div>
           </div>`);
-        return;
-      }
+          return;
+        }
 
-      const rows = upcoming
-        .map((t) => {
-          const [h, m] = t.arrival_time.split(":");
-          return `<div class="stop-popup-row">
+        const rows = upcoming
+          .map((t) => {
+            const [h, m] = t.arrival_time.split(":");
+            return `<div class="stop-popup-row">
             <span class="stop-popup-time">${h}:${m}</span>
-            <span class="stop-popup-trip">${t.trip_id}</span>
+            <span class="stop-popup-route">${t.trip_id}</span>
+            <span class="stop-popup-badge scheduled">Scheduled</span>
           </div>`;
-        })
-        .join("");
+          })
+          .join("");
 
-      marker.setPopupContent(`
+        marker.setPopupContent(`
         <div class="stop-popup">
           <div class="stop-popup-name">${stop.stop_name}</div>
           <div class="stop-popup-code">Stop ${stop.stop_code}</div>
           ${rows}
         </div>`);
+        return;
+      }
+
+      // 5. Show live arrivals
+      const rows = matchingTrips
+        .slice(0, 8)
+        .map((t) => {
+          const label = t.estMinutes <= 1 ? "Due" : `${t.estMinutes} min`;
+          return `<div class="stop-popup-row">
+          <span class="stop-popup-time">${label}</span>
+          <span class="stop-popup-route">${t.routeName}</span>
+          <span class="stop-popup-badge live">Live</span>
+        </div>`;
+        })
+        .join("");
+
+      marker.setPopupContent(`
+      <div class="stop-popup">
+        <div class="stop-popup-name">${stop.stop_name}</div>
+        <div class="stop-popup-code">Stop ${stop.stop_code}</div>
+        ${rows}
+      </div>`);
     } catch (err) {
       marker.setPopupContent(`
-        <div class="stop-popup">
-          <div class="stop-popup-name">${stop.stop_name}</div>
-          <div class="stop-popup-empty">Failed to load arrivals</div>
-        </div>`);
+      <div class="stop-popup">
+        <div class="stop-popup-name">${stop.stop_name}</div>
+        <div class="stop-popup-empty">Failed to load arrivals</div>
+      </div>`);
     }
   }
 
@@ -593,12 +662,11 @@
 
   function shouldShow(normalizedRoute) {
     const term = normalize(searchTerm);
-    const matchesSearch = !searchTerm || normalizedRoute.startsWith(term);
+    const matchesSearch = !searchTerm || normalizedRoute === term;
     const matchesFavourites =
       !favouritesMode || favourites.includes(normalizedRoute);
     return matchesSearch && matchesFavourites;
   }
-
   function isNearViewport(lat, lng) {
     const bounds = map.getBounds().pad(0.3);
     return bounds.contains([lat, lng]);
@@ -1105,5 +1173,29 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  :global(.stop-popup-route) {
+    color: #555;
+    font-size: 12px;
+    flex: 1;
+  }
+
+  :global(.stop-popup-badge) {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 10px;
+    text-transform: uppercase;
+  }
+
+  :global(.stop-popup-badge.live) {
+    background: #e8f5e9;
+    color: #2e7d32;
+  }
+
+  :global(.stop-popup-badge.scheduled) {
+    background: #e3f2fd;
+    color: #1565c0;
   }
 </style>
