@@ -249,7 +249,7 @@
     map.setView([lat, lng], zoom ?? map.getZoom());
     // After setView settles, nudge up by half the panel height in pixels
     requestAnimationFrame(() => {
-      const PANEL_PX = 320;
+      const PANEL_PX = 3200;
       map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
     });
   }
@@ -1358,7 +1358,7 @@
 
   .stop-panel {
     position: fixed;
-    bottom: 60px;
+    bottom: 100px;
     left: 0;
     right: 0;
     z-index: 1100;
