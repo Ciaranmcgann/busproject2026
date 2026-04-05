@@ -752,7 +752,7 @@
           transition: opacity 0.2s, filter 0.2s;
         ">
           <img
-            src="${import.meta.env.BASE_URL}bus.png"
+            src="${import.meta.env.BASE_URL}aoife.png"
             class="bus-img"
             style="transform: rotate(${rotation - 90}deg) scaleX(-1) ${flipped ? "scaleY(-1)" : ""};"
           />
@@ -1203,7 +1203,7 @@
 {#if !buses.length}
   <div class="loading">
     <img
-      src="{import.meta.env.BASE_URL}bus.png"
+      src="{import.meta.env.BASE_URL}aoife.png"
       class="spinner"
       alt="loading"
     />
