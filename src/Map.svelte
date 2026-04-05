@@ -9,7 +9,7 @@
   export let searchTerm = "";
   export let favourites = [];
   export let favouritesMode = false;
-  export let showStops = false;
+  export let showStops = true;
   export let showBuses = true;
   export let savedStops = [];
 
@@ -81,8 +81,6 @@
     return h * 60 + m + (s || 0) / 60;
   }
 
-  // Estimate minutes until a bus reaches targetIdx given it's nearest to nearestIdx.
-  // Uses scheduled arrival_time difference when available, falls back to 1.5 min/stop.
   function calcEstMinutes(stops, nearestIdx, targetIdx) {
     const fromTime = timeToMins(stops[nearestIdx]?.arrival_time);
     const toTime = timeToMins(stops[targetIdx]?.arrival_time);
@@ -207,7 +205,6 @@
       });
       if (!liveBus) return;
 
-      // Find nearest stop to the bus by minimum distance (no hard threshold)
       let nearestIdx = 0;
       let nearestDist = Infinity;
       for (let i = 0; i < stops.length; i++) {
@@ -222,7 +219,6 @@
         }
       }
 
-      // Only include if the bus hasn't passed the target stop yet
       if (nearestIdx < targetIdx) {
         result.add(tripId);
       }
@@ -242,19 +238,14 @@
     }
   }
 
-  // The stop panel sits at the bottom (~320px tall including tab bar).
-  // This helper shifts the target point upward so it lands in the visible
-  // portion of the map rather than under the panel.
   function panToWithPanelOffset(lat, lng, zoom) {
     map.setView([lat, lng], zoom ?? map.getZoom());
-    // After setView settles, nudge up by half the panel height in pixels
     requestAnimationFrame(() => {
       const PANEL_PX = 320;
       map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
     });
   }
 
-  // Fit bounds but reserve bottom space for the panel
   function fitBoundsWithPanel(bounds, opts = {}) {
     const PANEL_PX = 320;
     map.fitBounds(bounds, {
@@ -273,7 +264,6 @@
     dispatch("toggleSavedStop", stop);
   }
 
-  // Zoom map to a bus — fits both the bus and the selected stop if one is open
   export function zoomToBus(tripId) {
     const entry = [...busData.values()].find((b) => b.tripId === tripId);
     if (!entry) return;
@@ -308,8 +298,16 @@
     selectedRoute = "";
     incomingTripIds = getIncomingTripsForStop(stop.stop_id);
 
-    // Centre the stop in the visible portion of the map (above the panel)
-    panToWithPanelOffset(parseFloat(stop.stop_lat), parseFloat(stop.stop_lon));
+    const stopLat = parseFloat(stop.stop_lat);
+    const stopLng = parseFloat(stop.stop_lon);
+    setTimeout(() => {
+      const PANEL_PX = 320;
+      const zoom = Math.max(map.getZoom(), 16);
+      map.setView([stopLat, stopLng], zoom, { animate: true });
+      setTimeout(() => {
+        map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
+      }, 350);
+    }, 50);
 
     applySearch();
 
@@ -326,8 +324,6 @@
         });
         if (!liveBus) return;
 
-        // Find the nearest stop on this trip to the bus's current position
-        // using minimum distance rather than a hard snap threshold
         let nearestIdx = 0;
         let nearestDist = Infinity;
         for (let i = 0; i < stops.length; i++) {
@@ -342,7 +338,6 @@
           }
         }
 
-        // Bus is at or past the target stop — skip it
         if (nearestIdx >= targetIdx) return;
 
         const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
@@ -388,7 +383,6 @@
     }
   }
 
-  // Keep stop panel open — highlight the route and fit both the bus and stop in view
   function handleArrivalClick(arrival) {
     if (arrival.type !== "live" || !arrival.tripId) return;
     const entry = [...busData.values()].find(
@@ -399,7 +393,6 @@
     selectedRoute = entry.normalizedRoute;
     selectedTripId = arrival.tripId;
 
-    // Fit the map so both the bus and the selected stop are visible, above the panel
     if (selectedStop) {
       const stopLat = parseFloat(selectedStop.stop_lat);
       const stopLng = parseFloat(selectedStop.stop_lon);
@@ -596,16 +589,22 @@
 
     allStopsLayerGroup.clearLayers();
 
-    // Hide all stops while a stop panel is open — only the green selected
-    // marker (pinned by ensureSelectedStopMarker) should be visible.
     if (stopPanelStop) return;
 
+    // CHANGE 2: saved stops only show when favouritesMode is on (same as buses)
     // Gate: only show when toggle is on AND zoom >= 14
     if (!showStops || map.getZoom() < STOPS_MIN_ZOOM) return;
 
+    // When favouritesMode is on, only show saved stops
+    const stopsToShow = favouritesMode
+      ? allStops.filter((s) =>
+          savedStops.some((ss) => ss.stop_id === s.stop_id)
+        )
+      : allStops;
+
     const bounds = map.getBounds().pad(0.05);
 
-    allStops.forEach((stop) => {
+    stopsToShow.forEach((stop) => {
       const lat = parseFloat(stop.stop_lat);
       const lng = parseFloat(stop.stop_lon);
       if (!bounds.contains([lat, lng])) return;
@@ -710,8 +709,6 @@
       }
     }
 
-    // When a stop panel is open, don't render any route stops —
-    // only the green selected marker (from ensureSelectedStopMarker) shows.
     if (!stopPanelStop) {
       orderedStops.forEach((stop) => {
         if (!bounds.contains([stop.lat, stop.lng])) return;
@@ -752,7 +749,7 @@
           transition: opacity 0.2s, filter 0.2s;
         ">
           <img
-            src="${import.meta.env.BASE_URL}aoife.png"
+            src="${import.meta.env.BASE_URL}bus.png"
             class="bus-img"
             style="transform: rotate(${rotation - 90}deg) scaleX(-1) ${flipped ? "scaleY(-1)" : ""};"
           />
@@ -807,13 +804,18 @@
     return matchesSearch && matchesFavourites;
   }
 
+  // CHANGE 3: version that ignores favourites filter — used when a stop is selected
+  function shouldShowForStop(normalizedRoute) {
+    const term = normalize(searchTerm);
+    // Only apply search term filter, never favourites filter
+    return !searchTerm || normalizedRoute === term;
+  }
+
   function isNearViewport(lat, lng) {
     const bounds = map.getBounds().pad(0.3);
     return bounds.contains([lat, lng]);
   }
 
-  // ─── CHANGED: pin the selected stop marker so it stays green
-  //             even when the map pans away to a bus ───
   function ensureSelectedStopMarker() {
     if (!selectedStop) return;
 
@@ -821,10 +823,8 @@
     const lng = parseFloat(selectedStop.stop_lon);
 
     if (selectedStopMarker && map.hasLayer(selectedStopMarker)) {
-      // Already on map — just keep icon green
       selectedStopMarker.setIcon(makeStopIcon(true));
     } else {
-      // (Re)create it
       if (selectedStopMarker) map.removeLayer(selectedStopMarker);
       selectedStopMarker = L.marker([lat, lng], {
         icon: makeStopIcon(true),
@@ -845,7 +845,12 @@
     const hasSelectedRoute = !!selectedRoute;
 
     busData.forEach((bus) => {
-      const visible = showBuses && shouldShow(bus.normalizedRoute);
+      // CHANGE 3: when a stop panel is open, ignore the favourites filter
+      const visible =
+        showBuses &&
+        (hasSelectedStop
+          ? shouldShowForStop(bus.normalizedRoute)
+          : shouldShow(bus.normalizedRoute));
       const inViewport = isNearViewport(bus.lat, bus.lng);
       const isIncoming = incomingTripIds.has(bus.tripId);
       const isSelectedBus =
@@ -853,10 +858,8 @@
 
       let dimmed = false;
       if (hasSelectedStop && selectedTripId) {
-        // An arrival row is active — only show that exact bus
         dimmed = bus.tripId !== selectedTripId;
       } else if (hasSelectedStop) {
-        // Stop selected but no specific arrival clicked — show all incoming
         dimmed = !isIncoming;
       } else if (hasSelectedRoute) {
         dimmed = !isSelectedBus;
@@ -877,7 +880,7 @@
       bus.marker.setIcon(
         makeBusIcon(
           bus.bearing,
-          false, // never need opacity dimming — hidden buses are removed above
+          false,
           isSelectedBus,
           isIncoming && hasSelectedStop && !selectedTripId,
           direction
@@ -893,8 +896,6 @@
 
     showStopsForTrip(selectedTripId);
     renderAllStops();
-
-    // ─── Keep the selected stop marker pinned and green ───
     ensureSelectedStopMarker();
   }
 
@@ -926,6 +927,14 @@
           } catch (err) {
             console.warn("Failed to load stops for trip", bus.tripId, err);
           }
+        }
+
+        // Centre on the bus
+        const current = busData.get(bus.id);
+        if (current) {
+          map.setView([current.lat, current.lng], Math.max(map.getZoom(), 16), {
+            animate: true,
+          });
         }
 
         applySearch();
@@ -963,7 +972,6 @@
           entry.tripId = newBus.tripId;
           entry.normalizedRoute = normalizedRoute;
           entry.marker.setLatLng([newBus.lat, newBus.lng]);
-          // applySearch() called below handles icon + visibility
         } else {
           const marker = createMarker({ ...newBus, bearing }, normalizedRoute);
           busData.set(newBus.id, {
@@ -986,6 +994,19 @@
         refreshStopArrivals(selectedStop);
       }
 
+      // Follow the selected bus — pan smoothly to its new position
+      if (selectedTripId && !stopPanelStop) {
+        const followed = [...busData.values()].find(
+          (b) => b.tripId === selectedTripId
+        );
+        if (followed) {
+          map.panTo([followed.lat, followed.lng], {
+            animate: true,
+            duration: 0.8,
+          });
+        }
+      }
+
       updateTimer();
       applySearch();
     } catch (err) {
@@ -995,8 +1016,6 @@
     }
   }
 
-  // Silently recalculate arrival estimates from current bus positions.
-  // Called after every background refresh so times stay live.
   function refreshStopArrivals(stop) {
     const matchingTrips = [];
 
@@ -1039,7 +1058,6 @@
 
     matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
 
-    // Only update if we have live data — don't overwrite scheduled fallback
     if (matchingTrips.length > 0) {
       stopPanelArrivals = matchingTrips.slice(0, 8);
     }
@@ -1121,13 +1139,36 @@
     map.addLayer(clusterGroup);
 
     map.on("moveend zoomend", () => applySearch());
+
     map.on("click", () => {
-      selectedRoute = "";
-      selectedTripId = "";
-      clearSelectedStop();
-      if (shapeLayerGroup) shapeLayerGroup.clearLayers();
-      if (stopLayerGroup) stopLayerGroup.clearLayers();
-      applySearch();
+      if (stopPanelStop && selectedTripId) {
+        // A bus was selected from the arrivals list — deselect it and return to stop view
+        selectedRoute = "";
+        selectedTripId = "";
+        if (shapeLayerGroup) shapeLayerGroup.clearLayers();
+        if (stopLayerGroup) stopLayerGroup.clearLayers();
+        applySearch();
+        // Re-centre on the stop above the panel after a short delay so the
+        // map has finished any previous animation before we move it again
+        const stopLat = parseFloat(stopPanelStop.stop_lat);
+        const stopLng = parseFloat(stopPanelStop.stop_lon);
+        setTimeout(() => {
+          const PANEL_PX = 320;
+          const zoom = Math.max(map.getZoom(), 16);
+          map.setView([stopLat, stopLng], zoom, { animate: true });
+          setTimeout(() => {
+            map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
+          }, 350);
+        }, 50);
+      } else {
+        // No bus active (or no stop open) — fully reset
+        selectedRoute = "";
+        selectedTripId = "";
+        clearSelectedStop();
+        if (shapeLayerGroup) shapeLayerGroup.clearLayers();
+        if (stopLayerGroup) stopLayerGroup.clearLayers();
+        applySearch();
+      }
     });
 
     L.tileLayer(
@@ -1191,6 +1232,7 @@
     favouritesMode;
     showStops;
     showBuses;
+    savedStops;
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(() => {
       if (map && busData.size) applySearch();

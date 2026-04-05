@@ -12,7 +12,7 @@
 
   let favourites = JSON.parse(localStorage.getItem("bus-favourites") || "[]");
   let favouritesMode = localStorage.getItem("bus-favourites-mode") === "true";
-  let showStops = false;
+  let showStops = true;
   let showBuses = true;
 
   // Single source of truth for saved stops — shared between Map panel and footer
