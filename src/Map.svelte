@@ -50,9 +50,11 @@
   let stopPanelArrivals = [];
   let stopPanelLoading = false;
 
-  // Zoom level below which stops are hidden
-  const STOPS_MIN_ZOOM = 14;
+  // Rate limiting
+  let backoffDelay = 30000;
+  let lastManualRefresh = 0;
 
+  const STOPS_MIN_ZOOM = 14;
   const API = "https://bus-times.ciaranjmcgann.workers.dev";
 
   const DUBLIN_BOUNDS = {
@@ -90,15 +92,11 @@
     return Math.round((targetIdx - nearestIdx) * 1.5);
   }
 
+  // Always show seconds
   function updateTimer() {
     if (!lastUpdated) return;
     const secs = Math.floor((Date.now() - lastUpdated) / 1000);
-    if (secs < 60) {
-      timeSinceUpdate = `Updated ${secs}s ago`;
-    } else {
-      const mins = Math.floor(secs / 60);
-      timeSinceUpdate = `Updated ${mins}m ago`;
-    }
+    timeSinceUpdate = `Updated ${secs}s ago`;
   }
 
   function calculateBearing(lat1, lng1, lat2, lng2) {
@@ -238,14 +236,6 @@
     }
   }
 
-  function panToWithPanelOffset(lat, lng, zoom) {
-    map.setView([lat, lng], zoom ?? map.getZoom());
-    requestAnimationFrame(() => {
-      const PANEL_PX = 320;
-      map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
-    });
-  }
-
   function fitBoundsWithPanel(bounds, opts = {}) {
     const PANEL_PX = 320;
     map.fitBounds(bounds, {
@@ -311,7 +301,7 @@
     applySearch();
 
     try {
-      // NEW: fetch schedules for any live bus trips not yet in tripStopSequence
+      // Fetch schedules for any live bus trips not yet in tripStopSequence
       const unfetchedTripIds = [...busData.values()]
         .map((b) => b.tripId)
         .filter((id) => id && !tripStopSequence.has(id));
@@ -335,72 +325,10 @@
         })
       );
 
-      // NOW compute incoming trips with full data
+      // Compute incoming trips with full data
       incomingTripIds = getIncomingTripsForStop(stop.stop_id);
 
-      const matchingTrips = [];
-
-      tripStopSequence.forEach((stops, tripId) => {
-        const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
-        if (targetIdx === -1) return;
-
-        let liveBus = null;
-        busData.forEach((bus) => {
-          if (bus.tripId === tripId) liveBus = bus;
-        });
-        if (!liveBus) return;
-
-        let nearestIdx = 0;
-        let nearestDist = Infinity;
-        for (let i = 0; i < stops.length; i++) {
-          const ll = stopLatLng.get(stops[i].stop_id);
-          if (!ll) continue;
-          const dLat = ll.lat - liveBus.lat;
-          const dLng = ll.lng - liveBus.lng;
-          const dist = dLat * dLat + dLng * dLng;
-          if (dist < nearestDist) {
-            nearestDist = dist;
-            nearestIdx = i;
-          }
-        }
-
-        if (nearestIdx >= targetIdx) return;
-
-        const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
-        matchingTrips.push({
-          tripId,
-          routeName: liveBus.routeName,
-          normalizedRoute: liveBus.normalizedRoute,
-          estMinutes,
-          type: "live",
-        });
-      });
-
-      matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
-
-      if (matchingTrips.length > 0) {
-        stopPanelArrivals = matchingTrips.slice(0, 8);
-      } else {
-        const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
-        const times = await res.json();
-        const now = new Date();
-        const nowMins = now.getHours() * 60 + now.getMinutes();
-
-        stopPanelArrivals = times
-          .map((t) => {
-            const [h, m] = t.arrival_time.split(":").map(Number);
-            return { ...t, totalMins: h * 60 + m };
-          })
-          .filter((t) => t.totalMins >= nowMins)
-          .slice(0, 8)
-          .map((t) => ({
-            routeName: t.trip_id,
-            tripId: null,
-            estMinutes: t.totalMins - nowMins,
-            arrivalTime: t.arrival_time,
-            type: "scheduled",
-          }));
-      }
+      await refreshStopArrivals(stop);
     } catch (err) {
       stopPanelArrivals = [];
     } finally {
@@ -616,11 +544,8 @@
 
     if (stopPanelStop) return;
 
-    // CHANGE 2: saved stops only show when favouritesMode is on (same as buses)
-    // Gate: only show when toggle is on AND zoom >= 14
     if (!showStops || map.getZoom() < STOPS_MIN_ZOOM) return;
 
-    // When favouritesMode is on, only show saved stops
     const stopsToShow = favouritesMode
       ? allStops.filter((s) =>
           savedStops.some((ss) => ss.stop_id === s.stop_id)
@@ -788,6 +713,15 @@
   async function fetchBuses(routeNames) {
     try {
       const res = await fetch(`${API}/vehicles`);
+
+      if (res.status === 429) {
+        backoffDelay = Math.min(backoffDelay * 2, 120000);
+        console.warn(`Rate limited. Backing off to ${backoffDelay / 1000}s`);
+        return { buses: [], feedTimestamp: null };
+      }
+
+      backoffDelay = 30000; // reset on success
+
       if (!res.ok) return { buses: [], feedTimestamp: null };
       const buffer = await res.arrayBuffer();
       const feed = FeedMessage.decode(new Uint8Array(buffer));
@@ -829,10 +763,8 @@
     return matchesSearch && matchesFavourites;
   }
 
-  // CHANGE 3: version that ignores favourites filter — used when a stop is selected
   function shouldShowForStop(normalizedRoute) {
     const term = normalize(searchTerm);
-    // Only apply search term filter, never favourites filter
     return !searchTerm || normalizedRoute === term;
   }
 
@@ -870,7 +802,6 @@
     const hasSelectedRoute = !!selectedRoute;
 
     busData.forEach((bus) => {
-      // CHANGE 3: when a stop panel is open, ignore the favourites filter
       const visible =
         showBuses &&
         (hasSelectedStop
@@ -954,7 +885,6 @@
           }
         }
 
-        // Centre on the bus
         const current = busData.get(bus.id);
         if (current) {
           map.setView([current.lat, current.lng], Math.max(map.getZoom(), 16), {
@@ -1016,10 +946,9 @@
 
       if (selectedStop) {
         incomingTripIds = getIncomingTripsForStop(selectedStop.stop_id);
-        refreshStopArrivals(selectedStop);
+        await refreshStopArrivals(selectedStop);
       }
 
-      // Follow the selected bus — pan smoothly to its new position
       if (selectedTripId && !stopPanelStop) {
         const followed = [...busData.values()].find(
           (b) => b.tripId === selectedTripId
@@ -1041,7 +970,8 @@
     }
   }
 
-  function refreshStopArrivals(stop) {
+  // Fully async — updates live arrivals from bus positions, falls back to scheduled
+  async function refreshStopArrivals(stop) {
     const matchingTrips = [];
 
     tripStopSequence.forEach((stops, tripId) => {
@@ -1071,7 +1001,6 @@
       if (nearestIdx >= targetIdx) return;
 
       const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
-
       matchingTrips.push({
         tripId,
         routeName: liveBus.routeName,
@@ -1085,6 +1014,31 @@
 
     if (matchingTrips.length > 0) {
       stopPanelArrivals = matchingTrips.slice(0, 8);
+    } else {
+      // Refresh scheduled times so they tick down accurately
+      try {
+        const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
+        const times = await res.json();
+        const now = new Date();
+        const nowMins = now.getHours() * 60 + now.getMinutes();
+
+        stopPanelArrivals = times
+          .map((t) => {
+            const [h, m] = t.arrival_time.split(":").map(Number);
+            return { ...t, totalMins: h * 60 + m };
+          })
+          .filter((t) => t.totalMins >= nowMins)
+          .slice(0, 8)
+          .map((t) => ({
+            routeName: t.trip_id,
+            tripId: null,
+            estMinutes: t.totalMins - nowMins,
+            arrivalTime: t.arrival_time,
+            type: "scheduled",
+          }));
+      } catch (e) {
+        // Keep existing arrivals if fetch fails
+      }
     }
   }
 
@@ -1114,7 +1068,18 @@
   let routeNamesGlobal = {};
 
   function refreshPage() {
+    const now = Date.now();
+    if (now - lastManualRefresh < 10000) return; // 10s cooldown
+    lastManualRefresh = now;
     refreshBuses(routeNamesGlobal, false);
+  }
+
+  // Dynamic polling with backoff
+  function scheduleNextRefresh(routeNames) {
+    setTimeout(async () => {
+      await refreshBuses(routeNames, true);
+      scheduleNextRefresh(routeNames);
+    }, backoffDelay);
   }
 
   onMount(async () => {
@@ -1143,7 +1108,26 @@
     ]);
     setTimeout(() => map.invalidateSize(), 0);
 
+    // Update the "Xs ago" pill every second
     timerInterval = setInterval(updateTimer, 1000);
+
+    // Tick live arrival countdowns every second — no API call needed
+    setInterval(() => {
+      if (!stopPanelStop || stopPanelLoading) return;
+      stopPanelArrivals = stopPanelArrivals.map((a) => ({
+        ...a,
+        estMinutes: Math.max(0, a.estMinutes - 1 / 60),
+      }));
+    }, 1000);
+
+    // Re-compute arrivals from current bus positions every 10s
+    setInterval(async () => {
+      if (stopPanelStop && !stopPanelLoading) {
+        incomingTripIds = getIncomingTripsForStop(stopPanelStop.stop_id);
+        await refreshStopArrivals(stopPanelStop);
+        applySearch();
+      }
+    }, 10000);
 
     clusterGroup = L.markerClusterGroup({
       disableClusteringAtZoom: 14,
@@ -1167,14 +1151,11 @@
 
     map.on("click", () => {
       if (stopPanelStop && selectedTripId) {
-        // A bus was selected from the arrivals list — deselect it and return to stop view
         selectedRoute = "";
         selectedTripId = "";
         if (shapeLayerGroup) shapeLayerGroup.clearLayers();
         if (stopLayerGroup) stopLayerGroup.clearLayers();
         applySearch();
-        // Re-centre on the stop above the panel after a short delay so the
-        // map has finished any previous animation before we move it again
         const stopLat = parseFloat(stopPanelStop.stop_lat);
         const stopLng = parseFloat(stopPanelStop.stop_lon);
         setTimeout(() => {
@@ -1186,7 +1167,6 @@
           }, 350);
         }, 50);
       } else {
-        // No bus active (or no stop open) — fully reset
         selectedRoute = "";
         selectedTripId = "";
         clearSelectedStop();
@@ -1222,7 +1202,8 @@
       fetchRouteStops(routeNames).then(() => applySearch());
     });
 
-    setInterval(() => refreshBuses(routeNames, true), 30000);
+    // Start dynamic polling with backoff
+    scheduleNextRefresh(routeNames);
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
@@ -1340,7 +1321,7 @@
               {arrival.type === "live"
                 ? arrival.estMinutes <= 1
                   ? "Due"
-                  : `${arrival.estMinutes} min`
+                  : `${Math.floor(arrival.estMinutes)} min`
                 : (arrival.arrivalTime?.slice(0, 5) ?? "—")}
             </span>
             <span class="stop-panel-route">{arrival.routeName}</span>
@@ -1648,9 +1629,11 @@
   .locate-btn {
     top: 70px;
   }
+
   .refresh-btn {
     top: 130px;
   }
+
   .locate-btn svg,
   .refresh-btn svg {
     display: block;
@@ -1661,7 +1644,7 @@
     bottom: 110px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 1000;
+    z-index: 1200;
     background: rgba(0, 0, 0, 0.6);
     color: white;
     font-size: 12px;
@@ -1669,10 +1652,12 @@
     border-radius: 20px;
     pointer-events: none;
     white-space: nowrap;
+    transition: bottom 0.2s ease;
   }
 
+  /* Sit above the stop panel (100px footer + 260px panel + 10px gap) */
   .update-pill.above-panel {
-    bottom: 370px;
+    bottom: 375px;
   }
 
   .loading {
