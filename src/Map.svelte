@@ -296,7 +296,6 @@
     stopPanelLoading = true;
     selectedTripId = "";
     selectedRoute = "";
-    incomingTripIds = getIncomingTripsForStop(stop.stop_id);
 
     const stopLat = parseFloat(stop.stop_lat);
     const stopLng = parseFloat(stop.stop_lon);
@@ -312,6 +311,33 @@
     applySearch();
 
     try {
+      // NEW: fetch schedules for any live bus trips not yet in tripStopSequence
+      const unfetchedTripIds = [...busData.values()]
+        .map((b) => b.tripId)
+        .filter((id) => id && !tripStopSequence.has(id));
+
+      await Promise.all(
+        unfetchedTripIds.map(async (tripId) => {
+          try {
+            const stops = await fetchTripSchedule(tripId);
+            if (!stops?.length) return;
+            const ordered = stops
+              .map((s) => ({
+                stop_id: s.stop_id,
+                seq: parseInt(s.stop_sequence),
+                arrival_time: s.arrival_time || s.departure_time || null,
+              }))
+              .sort((a, b) => a.seq - b.seq);
+            tripStopSequence.set(tripId, ordered);
+          } catch (e) {
+            console.warn("Failed to fetch trip", tripId, e);
+          }
+        })
+      );
+
+      // NOW compute incoming trips with full data
+      incomingTripIds = getIncomingTripsForStop(stop.stop_id);
+
       const matchingTrips = [];
 
       tripStopSequence.forEach((stops, tripId) => {
@@ -341,7 +367,6 @@
         if (nearestIdx >= targetIdx) return;
 
         const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
-
         matchingTrips.push({
           tripId,
           routeName: liveBus.routeName,
@@ -1197,7 +1222,7 @@
       fetchRouteStops(routeNames).then(() => applySearch());
     });
 
-    setInterval(() => refreshBuses(routeNames, true), 15000);
+    setInterval(() => refreshBuses(routeNames, true), 30000);
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
@@ -1381,7 +1406,9 @@
 </button>
 
 {#if timeSinceUpdate}
-  <div class="update-pill">{timeSinceUpdate}</div>
+  <div class="update-pill" class:above-panel={!!stopPanelStop}>
+    {timeSinceUpdate}
+  </div>
 {/if}
 
 <style>
@@ -1631,7 +1658,7 @@
 
   .update-pill {
     position: fixed;
-    bottom: 66px;
+    bottom: 110px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 1000;
@@ -1642,6 +1669,10 @@
     border-radius: 20px;
     pointer-events: none;
     white-space: nowrap;
+  }
+
+  .update-pill.above-panel {
+    bottom: 370px;
   }
 
   .loading {
