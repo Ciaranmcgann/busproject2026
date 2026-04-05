@@ -46,10 +46,12 @@
   let selectedStopMarker = null;
   let incomingTripIds = new Set();
 
-  // Stop panel state
   let stopPanelStop = null;
   let stopPanelArrivals = [];
   let stopPanelLoading = false;
+
+  // Zoom level below which stops are hidden
+  const STOPS_MIN_ZOOM = 14;
 
   const API = "https://bus-times.ciaranjmcgann.workers.dev";
 
@@ -71,6 +73,23 @@
 
   function normalize(str) {
     return (str || "").replace(/\s/g, "").toLowerCase();
+  }
+
+  function timeToMins(t) {
+    if (!t) return null;
+    const [h, m, s] = t.split(":").map(Number);
+    return h * 60 + m + (s || 0) / 60;
+  }
+
+  // Estimate minutes until a bus reaches targetIdx given it's nearest to nearestIdx.
+  // Uses scheduled arrival_time difference when available, falls back to 1.5 min/stop.
+  function calcEstMinutes(stops, nearestIdx, targetIdx) {
+    const fromTime = timeToMins(stops[nearestIdx]?.arrival_time);
+    const toTime = timeToMins(stops[targetIdx]?.arrival_time);
+    if (fromTime !== null && toTime !== null && toTime > fromTime) {
+      return Math.round(toTime - fromTime);
+    }
+    return Math.round((targetIdx - nearestIdx) * 1.5);
   }
 
   function updateTimer() {
@@ -188,15 +207,23 @@
       });
       if (!liveBus) return;
 
-      const busStopIdx = stops.findIndex((s) => {
-        const ll = stopLatLng.get(s.stop_id);
-        if (!ll) return false;
+      // Find nearest stop to the bus by minimum distance (no hard threshold)
+      let nearestIdx = 0;
+      let nearestDist = Infinity;
+      for (let i = 0; i < stops.length; i++) {
+        const ll = stopLatLng.get(stops[i].stop_id);
+        if (!ll) continue;
         const dLat = ll.lat - liveBus.lat;
         const dLng = ll.lng - liveBus.lng;
-        return Math.sqrt(dLat * dLat + dLng * dLng) < 0.005;
-      });
+        const dist = dLat * dLat + dLng * dLng;
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearestIdx = i;
+        }
+      }
 
-      if (busStopIdx === -1 || busStopIdx < targetIdx) {
+      // Only include if the bus hasn't passed the target stop yet
+      if (nearestIdx < targetIdx) {
         result.add(tripId);
       }
     });
@@ -210,11 +237,32 @@
     stopPanelArrivals = [];
     incomingTripIds = new Set();
     if (selectedStopMarker) {
-      // Reset icon back to normal before removing
-      selectedStopMarker.setIcon(makeStopIcon(false));
       map.removeLayer(selectedStopMarker);
       selectedStopMarker = null;
     }
+  }
+
+  // The stop panel sits at the bottom (~320px tall including tab bar).
+  // This helper shifts the target point upward so it lands in the visible
+  // portion of the map rather than under the panel.
+  function panToWithPanelOffset(lat, lng, zoom) {
+    map.setView([lat, lng], zoom ?? map.getZoom());
+    // After setView settles, nudge up by half the panel height in pixels
+    requestAnimationFrame(() => {
+      const PANEL_PX = 320;
+      map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
+    });
+  }
+
+  // Fit bounds but reserve bottom space for the panel
+  function fitBoundsWithPanel(bounds, opts = {}) {
+    const PANEL_PX = 320;
+    map.fitBounds(bounds, {
+      paddingTopLeft: [60, 60],
+      paddingBottomRight: [60, 60 + PANEL_PX],
+      maxZoom: 16,
+      ...opts,
+    });
   }
 
   function isStopSaved(stopId) {
@@ -225,8 +273,27 @@
     dispatch("toggleSavedStop", stop);
   }
 
+  // Zoom map to a bus — fits both the bus and the selected stop if one is open
+  export function zoomToBus(tripId) {
+    const entry = [...busData.values()].find((b) => b.tripId === tripId);
+    if (!entry) return;
+
+    selectedRoute = entry.normalizedRoute;
+    selectedTripId = tripId;
+
+    if (selectedStop) {
+      const stopLat = parseFloat(selectedStop.stop_lat);
+      const stopLng = parseFloat(selectedStop.stop_lon);
+      const bounds = L.latLngBounds([entry.lat, entry.lng], [stopLat, stopLng]);
+      fitBoundsWithPanel(bounds);
+    } else {
+      map.setView([entry.lat, entry.lng], 16);
+    }
+
+    applySearch();
+  }
+
   async function openStopPanel(stop) {
-    // If same stop clicked again, close it — fix for re-click issue
     if (stopPanelStop && stopPanelStop.stop_id === stop.stop_id) {
       clearSelectedStop();
       applySearch();
@@ -237,7 +304,13 @@
     stopPanelStop = stop;
     stopPanelArrivals = [];
     stopPanelLoading = true;
+    selectedTripId = "";
+    selectedRoute = "";
     incomingTripIds = getIncomingTripsForStop(stop.stop_id);
+
+    // Centre the stop in the visible portion of the map (above the panel)
+    panToWithPanelOffset(parseFloat(stop.stop_lat), parseFloat(stop.stop_lon));
+
     applySearch();
 
     try {
@@ -253,23 +326,31 @@
         });
         if (!liveBus) return;
 
-        const busStopIdx = stops.findIndex((s) => {
-          const ll = stopLatLng.get(s.stop_id);
-          if (!ll) return false;
+        // Find the nearest stop on this trip to the bus's current position
+        // using minimum distance rather than a hard snap threshold
+        let nearestIdx = 0;
+        let nearestDist = Infinity;
+        for (let i = 0; i < stops.length; i++) {
+          const ll = stopLatLng.get(stops[i].stop_id);
+          if (!ll) continue;
           const dLat = ll.lat - liveBus.lat;
           const dLng = ll.lng - liveBus.lng;
-          return Math.sqrt(dLat * dLat + dLng * dLng) < 0.005;
-        });
+          const dist = dLat * dLat + dLng * dLng;
+          if (dist < nearestDist) {
+            nearestDist = dist;
+            nearestIdx = i;
+          }
+        }
 
-        if (busStopIdx !== -1 && busStopIdx >= targetIdx) return;
+        // Bus is at or past the target stop — skip it
+        if (nearestIdx >= targetIdx) return;
 
-        const stopsRemaining =
-          busStopIdx === -1 ? targetIdx : targetIdx - busStopIdx;
-        const estMinutes = Math.round(stopsRemaining * 0.5);
+        const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
 
         matchingTrips.push({
           tripId,
           routeName: liveBus.routeName,
+          normalizedRoute: liveBus.normalizedRoute,
           estMinutes,
           type: "live",
         });
@@ -294,6 +375,7 @@
           .slice(0, 8)
           .map((t) => ({
             routeName: t.trip_id,
+            tripId: null,
             estMinutes: t.totalMins - nowMins,
             arrivalTime: t.arrival_time,
             type: "scheduled",
@@ -304,6 +386,30 @@
     } finally {
       stopPanelLoading = false;
     }
+  }
+
+  // Keep stop panel open — highlight the route and fit both the bus and stop in view
+  function handleArrivalClick(arrival) {
+    if (arrival.type !== "live" || !arrival.tripId) return;
+    const entry = [...busData.values()].find(
+      (b) => b.tripId === arrival.tripId
+    );
+    if (!entry) return;
+
+    selectedRoute = entry.normalizedRoute;
+    selectedTripId = arrival.tripId;
+
+    // Fit the map so both the bus and the selected stop are visible, above the panel
+    if (selectedStop) {
+      const stopLat = parseFloat(selectedStop.stop_lat);
+      const stopLng = parseFloat(selectedStop.stop_lon);
+      const bounds = L.latLngBounds([entry.lat, entry.lng], [stopLat, stopLng]);
+      fitBoundsWithPanel(bounds);
+    } else {
+      map.setView([entry.lat, entry.lng], 16);
+    }
+
+    applySearch();
   }
 
   async function fetchRouteNames() {
@@ -455,6 +561,7 @@
                 .map((s) => ({
                   stop_id: s.stop_id,
                   seq: parseInt(s.stop_sequence),
+                  arrival_time: s.arrival_time || s.departure_time || null,
                 }))
                 .sort((a, b) => a.seq - b.seq);
 
@@ -489,7 +596,12 @@
 
     allStopsLayerGroup.clearLayers();
 
-    if (!showStops) return;
+    // Hide all stops while a stop panel is open — only the green selected
+    // marker (pinned by ensureSelectedStopMarker) should be visible.
+    if (stopPanelStop) return;
+
+    // Gate: only show when toggle is on AND zoom >= 14
+    if (!showStops || map.getZoom() < STOPS_MIN_ZOOM) return;
 
     const bounds = map.getBounds().pad(0.05);
 
@@ -498,14 +610,10 @@
       const lng = parseFloat(stop.stop_lon);
       if (!bounds.contains([lat, lng])) return;
 
-      const isSelected =
-        stopPanelStop && stopPanelStop.stop_id === stop.stop_id;
-      const marker = L.marker([lat, lng], { icon: makeStopIcon(isSelected) });
+      const marker = L.marker([lat, lng], { icon: makeStopIcon(false) });
 
       marker.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
-        // Update marker icon to green immediately
-        marker.setIcon(makeStopIcon(true));
         openStopPanel(stop);
       });
 
@@ -602,20 +710,21 @@
       }
     }
 
-    orderedStops.forEach((stop) => {
-      if (!bounds.contains([stop.lat, stop.lng])) return;
-      const isSelected =
-        stopPanelStop && stopPanelStop.stop_id === stop.stop_id;
-      const marker = L.marker([stop.lat, stop.lng], {
-        icon: makeStopIcon(isSelected),
+    // When a stop panel is open, don't render any route stops —
+    // only the green selected marker (from ensureSelectedStopMarker) shows.
+    if (!stopPanelStop) {
+      orderedStops.forEach((stop) => {
+        if (!bounds.contains([stop.lat, stop.lng])) return;
+        const marker = L.marker([stop.lat, stop.lng], {
+          icon: makeStopIcon(false),
+        });
+        marker.on("click", (e) => {
+          L.DomEvent.stopPropagation(e);
+          openStopPanel(stop);
+        });
+        stopLayerGroup.addLayer(marker);
       });
-      marker.on("click", (e) => {
-        L.DomEvent.stopPropagation(e);
-        marker.setIcon(makeStopIcon(true));
-        openStopPanel(stop);
-      });
-      stopLayerGroup.addLayer(marker);
-    });
+    }
   }
 
   function makeBusIcon(
@@ -703,6 +812,31 @@
     return bounds.contains([lat, lng]);
   }
 
+  // ─── CHANGED: pin the selected stop marker so it stays green
+  //             even when the map pans away to a bus ───
+  function ensureSelectedStopMarker() {
+    if (!selectedStop) return;
+
+    const lat = parseFloat(selectedStop.stop_lat);
+    const lng = parseFloat(selectedStop.stop_lon);
+
+    if (selectedStopMarker && map.hasLayer(selectedStopMarker)) {
+      // Already on map — just keep icon green
+      selectedStopMarker.setIcon(makeStopIcon(true));
+    } else {
+      // (Re)create it
+      if (selectedStopMarker) map.removeLayer(selectedStopMarker);
+      selectedStopMarker = L.marker([lat, lng], {
+        icon: makeStopIcon(true),
+        zIndexOffset: 500,
+      }).addTo(map);
+      selectedStopMarker.on("click", (e) => {
+        L.DomEvent.stopPropagation(e);
+        openStopPanel(selectedStop);
+      });
+    }
+  }
+
   function applySearch() {
     if (!map || !clusterGroup) return;
 
@@ -718,13 +852,17 @@
         hasSelectedRoute && bus.normalizedRoute === normalize(selectedRoute);
 
       let dimmed = false;
-      if (hasSelectedStop) {
+      if (hasSelectedStop && selectedTripId) {
+        // An arrival row is active — only show that exact bus
+        dimmed = bus.tripId !== selectedTripId;
+      } else if (hasSelectedStop) {
+        // Stop selected but no specific arrival clicked — show all incoming
         dimmed = !isIncoming;
       } else if (hasSelectedRoute) {
         dimmed = !isSelectedBus;
       }
 
-      if (visible && inViewport) {
+      if (visible && inViewport && !dimmed) {
         if (!clusterGroup.hasLayer(bus.marker)) {
           clusterGroup.addLayer(bus.marker);
         }
@@ -739,9 +877,9 @@
       bus.marker.setIcon(
         makeBusIcon(
           bus.bearing,
-          dimmed,
+          false, // never need opacity dimming — hidden buses are removed above
           isSelectedBus,
-          isIncoming && hasSelectedStop,
+          isIncoming && hasSelectedStop && !selectedTripId,
           direction
         )
       );
@@ -755,6 +893,9 @@
 
     showStopsForTrip(selectedTripId);
     renderAllStops();
+
+    // ─── Keep the selected stop marker pinned and green ───
+    ensureSelectedStopMarker();
   }
 
   function createMarker(bus, normalizedRoute) {
@@ -822,23 +963,7 @@
           entry.tripId = newBus.tripId;
           entry.normalizedRoute = normalizedRoute;
           entry.marker.setLatLng([newBus.lat, newBus.lng]);
-          const isIncoming = incomingTripIds.has(newBus.tripId);
-          const hasSelectedStop = selectedStop !== null;
-          const isSelectedBus =
-            selectedRoute && normalizedRoute === normalize(selectedRoute);
-          let dimmed = false;
-          if (hasSelectedStop) dimmed = !isIncoming;
-          else if (selectedRoute) dimmed = !isSelectedBus;
-          const direction = getTripDirection(newBus.tripId);
-          entry.marker.setIcon(
-            makeBusIcon(
-              bearing,
-              dimmed,
-              isSelectedBus,
-              isIncoming && hasSelectedStop,
-              direction
-            )
-          );
+          // applySearch() called below handles icon + visibility
         } else {
           const marker = createMarker({ ...newBus, bearing }, normalizedRoute);
           busData.set(newBus.id, {
@@ -858,6 +983,7 @@
 
       if (selectedStop) {
         incomingTripIds = getIncomingTripsForStop(selectedStop.stop_id);
+        refreshStopArrivals(selectedStop);
       }
 
       updateTimer();
@@ -866,6 +992,56 @@
       console.error("Failed to refresh buses:", err);
     } finally {
       isFetching = false;
+    }
+  }
+
+  // Silently recalculate arrival estimates from current bus positions.
+  // Called after every background refresh so times stay live.
+  function refreshStopArrivals(stop) {
+    const matchingTrips = [];
+
+    tripStopSequence.forEach((stops, tripId) => {
+      const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
+      if (targetIdx === -1) return;
+
+      let liveBus = null;
+      busData.forEach((bus) => {
+        if (bus.tripId === tripId) liveBus = bus;
+      });
+      if (!liveBus) return;
+
+      let nearestIdx = 0;
+      let nearestDist = Infinity;
+      for (let i = 0; i < stops.length; i++) {
+        const ll = stopLatLng.get(stops[i].stop_id);
+        if (!ll) continue;
+        const dLat = ll.lat - liveBus.lat;
+        const dLng = ll.lng - liveBus.lng;
+        const dist = dLat * dLat + dLng * dLng;
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          nearestIdx = i;
+        }
+      }
+
+      if (nearestIdx >= targetIdx) return;
+
+      const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
+
+      matchingTrips.push({
+        tripId,
+        routeName: liveBus.routeName,
+        normalizedRoute: liveBus.normalizedRoute,
+        estMinutes,
+        type: "live",
+      });
+    });
+
+    matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
+
+    // Only update if we have live data — don't overwrite scheduled fallback
+    if (matchingTrips.length > 0) {
+      stopPanelArrivals = matchingTrips.slice(0, 8);
     }
   }
 
@@ -878,14 +1054,12 @@
   export function jumpToStop(stop) {
     const lat = parseFloat(stop.stop_lat);
     const lng = parseFloat(stop.stop_lon);
-    map.setView([lat, lng], 17);
 
     if (selectedStopMarker) map.removeLayer(selectedStopMarker);
 
     selectedStopMarker = L.marker([lat, lng], {
       icon: makeStopIcon(true),
     }).addTo(map);
-
     openStopPanel(stop);
 
     selectedStopMarker.on("click", (e) => {
@@ -1037,7 +1211,6 @@
   </div>
 {/if}
 
-<!-- Stop arrivals panel — slides up above the footer -->
 {#if stopPanelStop}
   <div class="stop-panel">
     <div class="stop-panel-header">
@@ -1091,7 +1264,11 @@
         <div class="stop-panel-empty">No upcoming arrivals</div>
       {:else}
         {#each stopPanelArrivals as arrival}
-          <div class="stop-panel-row">
+          <button
+            class="stop-panel-row"
+            class:clickable={arrival.type === "live" && arrival.tripId}
+            on:click={() => handleArrivalClick(arrival)}
+          >
             <span class="stop-panel-time">
               {arrival.type === "live"
                 ? arrival.estMinutes <= 1
@@ -1107,7 +1284,20 @@
             >
               {arrival.type === "live" ? "Live" : "Scheduled"}
             </span>
-          </div>
+            {#if arrival.type === "live" && arrival.tripId}
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#aaa"
+                stroke-width="2"
+                style="flex-shrink:0"
+              >
+                <polyline points="9 18 15 12 9 6"></polyline>
+              </svg>
+            {/if}
+          </button>
         {/each}
       {/if}
     </div>
@@ -1166,10 +1356,9 @@
     height: 100%;
   }
 
-  /* Stop arrivals panel */
   .stop-panel {
     position: fixed;
-    bottom: 60px; /* sits above the footer */
+    bottom: 60px;
     left: 0;
     right: 0;
     z-index: 1100;
@@ -1265,6 +1454,21 @@
     padding: 8px 16px;
     border-bottom: 1px solid #f8f8f8;
     font-size: 13px;
+    width: 100%;
+    background: none;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    text-align: left;
+    cursor: default;
+  }
+
+  .stop-panel-row.clickable {
+    cursor: pointer;
+  }
+
+  .stop-panel-row.clickable:hover {
+    background: #f5f8ff;
   }
 
   .stop-panel-time {
@@ -1378,7 +1582,6 @@
   .refresh-btn {
     top: 130px;
   }
-
   .locate-btn svg,
   .refresh-btn svg {
     display: block;

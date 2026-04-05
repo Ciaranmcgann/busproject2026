@@ -15,6 +15,9 @@
   let showStops = false;
   let showBuses = true;
 
+  // Single source of truth for saved stops — shared between Map panel and footer
+  let savedStops = JSON.parse(localStorage.getItem("bus-saved-stops") || "[]");
+
   function handleSearch(event) {
     searchTerm = event.detail;
   }
@@ -64,6 +67,27 @@
     mapRef?.jumpToStop(e.detail);
   }
 
+  // Both the map panel Save button and the footer search use this
+  function handleToggleSavedStop(e) {
+    const stop = e.detail;
+    const exists = savedStops.some((s) => s.stop_id === stop.stop_id);
+    if (exists) {
+      savedStops = savedStops.filter((s) => s.stop_id !== stop.stop_id);
+    } else {
+      savedStops = [
+        ...savedStops,
+        {
+          stop_id: stop.stop_id,
+          stop_name: stop.stop_name,
+          stop_code: stop.stop_code,
+          stop_lat: stop.stop_lat,
+          stop_lon: stop.stop_lon,
+        },
+      ];
+    }
+    localStorage.setItem("bus-saved-stops", JSON.stringify(savedStops));
+  }
+
   onMount(loadRoutes);
 </script>
 
@@ -78,8 +102,10 @@
       {favouritesMode}
       {showStops}
       {showBuses}
+      {savedStops}
       on:addFavourite={(e) => toggleFavourite(e.detail)}
       on:stopsLoaded={handleStopsLoaded}
+      on:toggleSavedStop={handleToggleSavedStop}
     />
   </main>
 
@@ -129,9 +155,11 @@
     {favouritesMode}
     allRoutes={routes}
     {allStops}
+    {savedStops}
     on:toggleFavourite={(e) => toggleFavourite(e.detail)}
     on:toggleMode={toggleMode}
     on:jumpToStop={handleJumpToStop}
+    on:toggleSavedStop={handleToggleSavedStop}
   />
 </div>
 
@@ -177,7 +205,6 @@
   .stops-btn {
     top: 190px;
   }
-
   .buses-btn {
     top: 250px;
   }

@@ -7,17 +7,14 @@
   export let favouritesMode = false;
   export let allRoutes = [];
   export let allStops = [];
+  export let savedStops = []; // single source of truth from App.svelte
 
   let pageOpen = false;
   let editMode = false;
   let searchTerm = "";
   let searchResults = [];
 
-  // Stops tab
-  let activeTab = "routes"; // "routes" | "stops"
-  let favouriteStops = JSON.parse(
-    localStorage.getItem("bus-favourite-stops") || "[]"
-  );
+  let activeTab = "routes";
   let stopSearchTerm = "";
   let stopSearchResults = [];
 
@@ -29,28 +26,12 @@
     dispatch("toggleMode");
   }
 
-  export function toggleFavouriteStop(stop) {
-    const exists = favouriteStops.find((s) => s.stop_id === stop.stop_id);
-    if (exists) {
-      favouriteStops = favouriteStops.filter((s) => s.stop_id !== stop.stop_id);
-    } else {
-      favouriteStops = [
-        ...favouriteStops,
-        {
-          stop_id: stop.stop_id,
-          stop_name: stop.stop_name,
-          stop_code: stop.stop_code,
-          stop_lat: stop.stop_lat,
-          stop_lon: stop.stop_lon,
-        },
-      ];
-    }
-    localStorage.setItem("bus-favourite-stops", JSON.stringify(favouriteStops));
-    dispatch("favouriteStopsChanged", favouriteStops);
+  function toggleSavedStop(stop) {
+    dispatch("toggleSavedStop", stop);
   }
 
-  export function isFavouriteStop(stop_id) {
-    return favouriteStops.some((s) => s.stop_id === stop_id);
+  function isSavedStop(stop_id) {
+    return savedStops.some((s) => s.stop_id === stop_id);
   }
 
   function openPage(tab = "routes") {
@@ -112,13 +93,12 @@
       .slice(0, 10);
   }
 
-  function tapFavouriteStop(stop) {
+  function tapSavedStop(stop) {
     dispatch("jumpToStop", stop);
     closePage();
   }
 </script>
 
-<!-- Footer -->
 <div class="footer">
   <button class="fav-open-btn" on:click={() => openPage("routes")}>
     <span class="label">Saved Routes</span>
@@ -129,8 +109,8 @@
 
   <button class="fav-open-btn" on:click={() => openPage("stops")}>
     <span class="label">Saved Stops</span>
-    {#if favouriteStops.length > 0}
-      <span class="badge">{favouriteStops.length}</span>
+    {#if savedStops.length > 0}
+      <span class="badge">{savedStops.length}</span>
     {/if}
   </button>
 
@@ -144,7 +124,6 @@
   </button>
 </div>
 
-<!-- Full-screen page -->
 {#if pageOpen}
   <div class="fav-page">
     <div class="fav-page-header">
@@ -174,7 +153,6 @@
       </button>
     </div>
 
-    <!-- ROUTES TAB -->
     {#if activeTab === "routes"}
       <div class="search-wrap">
         <input
@@ -193,9 +171,9 @@
                 on:click={() => addFavourite(result)}
               >
                 <span>{result}</span>
-                <span class="add-icon">
-                  {favourites.includes(normalize(result)) ? "✓" : "+"}
-                </span>
+                <span class="add-icon"
+                  >{favourites.includes(normalize(result)) ? "✓" : "+"}</span
+                >
               </button>
             {/each}
           </div>
@@ -214,19 +192,14 @@
             <div class="fav-row">
               <div class="fav-route-pill">{fav}</div>
               {#if editMode}
-                <button
-                  class="remove-btn"
-                  on:click={() => toggleFavourite(fav)}
+                <button class="remove-btn" on:click={() => toggleFavourite(fav)}
+                  >Remove</button
                 >
-                  Remove
-                </button>
               {/if}
             </div>
           {/each}
         {/if}
       </div>
-
-      <!-- STOPS TAB -->
     {:else}
       <div class="search-wrap">
         <input
@@ -241,16 +214,16 @@
             {#each stopSearchResults as stop}
               <button
                 class="search-result-item"
-                class:already={isFavouriteStop(stop.stop_id)}
-                on:click={() => toggleFavouriteStop(stop)}
+                class:already={isSavedStop(stop.stop_id)}
+                on:click={() => toggleSavedStop(stop)}
               >
                 <span>
                   <span class="stop-result-name">{stop.stop_name}</span>
                   <span class="stop-result-code">#{stop.stop_code}</span>
                 </span>
-                <span class="add-icon">
-                  {isFavouriteStop(stop.stop_id) ? "✓" : "+"}
-                </span>
+                <span class="add-icon"
+                  >{isSavedStop(stop.stop_id) ? "✓" : "+"}</span
+                >
               </button>
             {/each}
           </div>
@@ -258,20 +231,21 @@
       </div>
 
       <div class="fav-list">
-        {#if favouriteStops.length === 0}
+        {#if savedStops.length === 0}
           <div class="empty">
             <div class="empty-icon">🚏</div>
-            <div>No favourite stops yet</div>
+            <div>No saved stops yet</div>
             <div class="empty-sub">
-              Search for a stop above, or tap a stop on the map
+              Search for a stop above, or tap a stop on the map and press Save
+              stop
             </div>
           </div>
         {:else}
-          {#each favouriteStops as stop}
+          {#each savedStops as stop}
             <div
               class="fav-row"
               style="cursor:pointer;"
-              on:click={() => tapFavouriteStop(stop)}
+              on:click={() => tapSavedStop(stop)}
             >
               <div>
                 <div class="fav-route-pill">{stop.stop_name}</div>
@@ -280,7 +254,7 @@
               {#if editMode}
                 <button
                   class="remove-btn"
-                  on:click|stopPropagation={() => toggleFavouriteStop(stop)}
+                  on:click|stopPropagation={() => toggleSavedStop(stop)}
                 >
                   Remove
                 </button>
@@ -488,11 +462,9 @@
   .search-result-item:last-child {
     border-bottom: none;
   }
-
   .search-result-item:hover {
     background: #f5f5f5;
   }
-
   .search-result-item.already {
     color: #888;
   }
@@ -502,7 +474,6 @@
     color: #1a73e8;
     font-weight: 700;
   }
-
   .search-result-item.already .add-icon {
     color: #4caf50;
   }
@@ -511,7 +482,6 @@
     font-weight: 500;
     display: block;
   }
-
   .stop-result-code {
     font-size: 12px;
     color: #888;
@@ -539,7 +509,6 @@
     font-weight: 600;
     color: #222;
   }
-
   .stop-code-label {
     font-size: 12px;
     color: #888;
@@ -577,7 +546,6 @@
     font-size: 48px;
     margin-bottom: 8px;
   }
-
   .empty-sub {
     font-size: 13px;
     color: #bbb;
