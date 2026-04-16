@@ -34,6 +34,19 @@
   let timeSinceUpdate = "";
   let timerInterval;
   let routeStopIds = new Map();
+  let tripRouteNameMap = new Map(); // tripId → short route name, built before first bus fetch
+  let tripSuffixToStaticId = new Map(); // numeric suffix → static trip_id (e.g. "1501" → "5552_1501")
+
+  // Resolve a live feed tripId (e.g. "5576_1501") to the static trip_id ("5552_1501")
+  // by matching on the numeric suffix. Falls back to the input if no match found.
+  function resolveStaticTripId(liveTripId) {
+    if (!liveTripId) return liveTripId;
+    if (tripStopSequence.has(liveTripId)) return liveTripId;
+    const suffix = liveTripId.split("_")[1];
+    if (suffix && tripSuffixToStaticId.has(suffix))
+      return tripSuffixToStaticId.get(suffix);
+    return liveTripId;
+  }
 
   let shapePoints = new Map();
   let tripShapeMap = new Map();
@@ -193,13 +206,14 @@
   function getIncomingTripsForStop(stopId) {
     const result = new Set();
 
-    tripStopSequence.forEach((stops, tripId) => {
+    tripStopSequence.forEach((stops, staticTripId) => {
       const targetIdx = stops.findIndex((s) => s.stop_id === stopId);
       if (targetIdx === -1) return;
 
+      // Match live buses by resolving their feed tripId to the static tripId
       let liveBus = null;
       busData.forEach((bus) => {
-        if (bus.tripId === tripId) liveBus = bus;
+        if (resolveStaticTripId(bus.tripId) === staticTripId) liveBus = bus;
       });
       if (!liveBus) return;
 
@@ -218,20 +232,21 @@
       }
 
       if (nearestIdx < targetIdx) {
-        result.add(tripId);
+        result.add(staticTripId); // FIX: was `tripId` (undefined) — should be `staticTripId`
       }
     });
 
     return result;
   }
 
+  // FIX: guard every removal with map.hasLayer() to prevent "Node cannot be found"
   function clearSelectedStop() {
     selectedStop = null;
     stopPanelStop = null;
     stopPanelArrivals = [];
     incomingTripIds = new Set();
     if (selectedStopMarker) {
-      map.removeLayer(selectedStopMarker);
+      if (map.hasLayer(selectedStopMarker)) map.removeLayer(selectedStopMarker);
       selectedStopMarker = null;
     }
   }
@@ -307,9 +322,12 @@
         .filter((id) => id && !tripStopSequence.has(id));
 
       await Promise.all(
-        unfetchedTripIds.map(async (tripId) => {
+        unfetchedTripIds.map(async (liveTripId) => {
           try {
-            const stops = await fetchTripSchedule(tripId);
+            // Resolve to static tripId for fetching and storing
+            const staticTripId = resolveStaticTripId(liveTripId);
+            if (tripStopSequence.has(staticTripId)) return;
+            const stops = await fetchTripSchedule(staticTripId);
             if (!stops?.length) return;
             const ordered = stops
               .map((s) => ({
@@ -318,9 +336,9 @@
                 arrival_time: s.arrival_time || s.departure_time || null,
               }))
               .sort((a, b) => a.seq - b.seq);
-            tripStopSequence.set(tripId, ordered);
+            tripStopSequence.set(staticTripId, ordered);
           } catch (e) {
-            console.warn("Failed to fetch trip", tripId, e);
+            console.warn("Failed to fetch trip", liveTripId, e);
           }
         })
       );
@@ -362,10 +380,22 @@
     try {
       const res = await fetch(`${API}/routes`);
       const routes = await res.json();
+
+      // FIX: log a sample to help debug key mismatches in future
+      if (routes.length) {
+        console.log("[routes] sample entry:", routes[0]);
+      }
+
       const lookup = {};
       for (const r of routes) {
         if (r.route_id && r.route_short_name) {
-          lookup[r.route_id.trim()] = r.route_short_name.trim();
+          const key = r.route_id.trim();
+          const name = r.route_short_name.trim();
+          // Index by full route_id
+          lookup[key] = name;
+          // Also index by the leading segment before any dash (e.g. "60" from "60-1-b12-1")
+          const shortKey = key.split("-")[0];
+          if (!lookup[shortKey]) lookup[shortKey] = name;
         }
       }
       return lookup;
@@ -456,6 +486,42 @@
     return stops;
   }
 
+  // Fetch trips early so tripRouteNameMap is ready before the first bus fetch
+  // Keys are stored both as full trip_id AND as the numeric suffix after "_"
+  // because the realtime feed uses a different agency prefix than static data
+  async function fetchTripRouteNames(routeNames) {
+    try {
+      const tripsRes = await fetch(`${API}/trips`);
+      const tripsJson = await tripsRes.json();
+      const tripsArray = Array.isArray(tripsJson)
+        ? tripsJson
+        : Object.entries(tripsJson.trips).map(([trip_id, t]) => ({
+            trip_id,
+            ...t,
+          }));
+
+      for (const trip of tripsArray) {
+        const shortName = routeNames[trip.route_id?.trim()];
+        if (!shortName) continue;
+        // Index by full trip_id
+        tripRouteNameMap.set(trip.trip_id, shortName);
+        // Also index by the numeric suffix after "_" (e.g. "1501" from "5552_1501")
+        // so we can match realtime feed IDs that use a different prefix (e.g. "5576_1501")
+        const suffix = trip.trip_id?.split("_")[1];
+        if (suffix) {
+          tripRouteNameMap.set(suffix, shortName);
+          // Map suffix → full static trip_id so live tripIds can be resolved to static ones
+          tripSuffixToStaticId.set(suffix, trip.trip_id);
+        }
+        if (trip.trip_id && trip.shape_id)
+          tripShapeMap.set(trip.trip_id, trip.shape_id);
+      }
+      console.log(`[tripRouteNameMap] ${tripRouteNameMap.size} entries`);
+    } catch (e) {
+      console.warn("Could not build tripRouteNameMap", e);
+    }
+  }
+
   async function fetchRouteStops(routeNames) {
     try {
       const tripsRes = await fetch(`${API}/trips`);
@@ -471,8 +537,12 @@
       const tripToNormalizedRoute = new Map();
       for (const trip of tripsArray) {
         const shortName = routeNames[trip.route_id?.trim()];
-        if (shortName)
+        if (shortName) {
           tripToNormalizedRoute.set(trip.trip_id, normalize(shortName));
+          tripRouteNameMap.set(trip.trip_id, shortName);
+          const suffix = trip.trip_id?.split("_")[1];
+          if (suffix) tripRouteNameMap.set(suffix, shortName);
+        }
         if (trip.trip_id && trip.shape_id)
           tripShapeMap.set(trip.trip_id, trip.shape_id);
       }
@@ -736,7 +806,15 @@
         .map(({ id, vehicle: v }) => {
           const routeId = v.trip?.routeId || "";
           const tripId = v.trip?.tripId || "";
-          const routeName = routeNames[routeId] || "N/A";
+          // Try full tripId, then just the numeric suffix (handles agency prefix mismatch
+          // between realtime feed e.g. "5576_1501" and static data e.g. "5552_1501"),
+          // then fall back to routeId lookup
+          const tripSuffix = tripId.split("_")[1] || "";
+          const routeName =
+            tripRouteNameMap.get(tripId) ||
+            tripRouteNameMap.get(tripSuffix) ||
+            routeNames[routeId] ||
+            "N/A";
           const stableId = v.vehicle?.id || v.vehicle?.label || id;
           return {
             id: stableId,
@@ -773,6 +851,7 @@
     return bounds.contains([lat, lng]);
   }
 
+  // FIX: guard with map.hasLayer() before removing/re-adding the selected stop marker
   function ensureSelectedStopMarker() {
     if (!selectedStop) return;
 
@@ -782,7 +861,9 @@
     if (selectedStopMarker && map.hasLayer(selectedStopMarker)) {
       selectedStopMarker.setIcon(makeStopIcon(true));
     } else {
-      if (selectedStopMarker) map.removeLayer(selectedStopMarker);
+      if (selectedStopMarker && map.hasLayer(selectedStopMarker)) {
+        map.removeLayer(selectedStopMarker);
+      }
       selectedStopMarker = L.marker([lat, lng], {
         icon: makeStopIcon(true),
         zIndexOffset: 500,
@@ -808,7 +889,7 @@
           ? shouldShowForStop(bus.normalizedRoute)
           : shouldShow(bus.normalizedRoute));
       const inViewport = isNearViewport(bus.lat, bus.lng);
-      const isIncoming = incomingTripIds.has(bus.tripId);
+      const isIncoming = incomingTripIds.has(resolveStaticTripId(bus.tripId));
       const isSelectedBus =
         hasSelectedRoute && bus.normalizedRoute === normalize(selectedRoute);
 
@@ -850,7 +931,7 @@
       shouldAutoFit = false;
     }
 
-    showStopsForTrip(selectedTripId);
+    showStopsForTrip(resolveStaticTripId(selectedTripId));
     renderAllStops();
     ensureSelectedStopMarker();
   }
@@ -868,9 +949,10 @@
         selectedRoute = normalizedRoute;
         selectedTripId = bus.tripId;
 
-        if (!tripStopSequence.has(bus.tripId)) {
+        const staticTripId = resolveStaticTripId(bus.tripId);
+        if (!tripStopSequence.has(staticTripId)) {
           try {
-            const stops = await fetchTripSchedule(bus.tripId);
+            const stops = await fetchTripSchedule(staticTripId);
             if (stops) {
               const ordered = stops
                 .map((s) => ({
@@ -878,10 +960,10 @@
                   seq: parseInt(s.stop_sequence),
                 }))
                 .sort((a, b) => a.seq - b.seq);
-              tripStopSequence.set(bus.tripId, ordered);
+              tripStopSequence.set(staticTripId, ordered);
             }
           } catch (err) {
-            console.warn("Failed to load stops for trip", bus.tripId, err);
+            console.warn("Failed to load stops for trip", staticTripId, err);
           }
         }
 
@@ -974,13 +1056,14 @@
   async function refreshStopArrivals(stop) {
     const matchingTrips = [];
 
-    tripStopSequence.forEach((stops, tripId) => {
+    tripStopSequence.forEach((stops, staticTripId) => {
       const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
       if (targetIdx === -1) return;
 
+      // Match live buses by resolving their feed tripId to the static tripId
       let liveBus = null;
       busData.forEach((bus) => {
-        if (bus.tripId === tripId) liveBus = bus;
+        if (resolveStaticTripId(bus.tripId) === staticTripId) liveBus = bus;
       });
       if (!liveBus) return;
 
@@ -1002,7 +1085,8 @@
 
       const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
       matchingTrips.push({
-        tripId,
+        tripId: liveBus.tripId, // ✅ for clicking / zooming
+        staticTripId: staticTripId, // ✅ for schedule + matching
         routeName: liveBus.routeName,
         normalizedRoute: liveBus.normalizedRoute,
         estMinutes,
@@ -1048,21 +1132,13 @@
     }
   }
 
+  // FIX: delegate marker creation entirely to openStopPanel/ensureSelectedStopMarker
+  // rather than duplicating it here, to avoid double-add / stale-node errors
   export function jumpToStop(stop) {
     const lat = parseFloat(stop.stop_lat);
     const lng = parseFloat(stop.stop_lon);
-
-    if (selectedStopMarker) map.removeLayer(selectedStopMarker);
-
-    selectedStopMarker = L.marker([lat, lng], {
-      icon: makeStopIcon(true),
-    }).addTo(map);
+    map.setView([lat, lng], Math.max(map.getZoom(), 16));
     openStopPanel(stop);
-
-    selectedStopMarker.on("click", (e) => {
-      L.DomEvent.stopPropagation(e);
-      openStopPanel(stop);
-    });
   }
 
   let routeNamesGlobal = {};
@@ -1195,6 +1271,69 @@
 
     routeNamesGlobal = routeNames;
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
+
+    // ── DIAGNOSTICS ──────────────────────────────────────────────
+    try {
+      const rawRoutes = await fetch(`${API}/routes`).then((r) => r.json());
+      const routesArr = Array.isArray(rawRoutes)
+        ? rawRoutes
+        : Object.values(rawRoutes);
+      console.log("[diag] routes[0]:", routesArr[0]);
+      console.log("[diag] routes count:", routesArr.length);
+    } catch (e) {
+      console.warn("[diag] routes failed:", e);
+    }
+
+    try {
+      const rawTrips = await fetch(`${API}/trips`).then((r) => r.json());
+      const tripsArr = Array.isArray(rawTrips)
+        ? rawTrips
+        : Object.entries(rawTrips.trips ?? rawTrips).map(([trip_id, t]) => ({
+            trip_id,
+            ...t,
+          }));
+      console.log("[diag] trips[0]:", tripsArr[0]);
+      console.log("[diag] trips count:", tripsArr.length);
+    } catch (e) {
+      console.warn("[diag] trips failed:", e);
+    }
+
+    try {
+      const vehRes = await fetch(`${API}/vehicles`);
+      console.log("[diag] vehicles status:", vehRes.status);
+      if (vehRes.ok) {
+        const buf = await vehRes.arrayBuffer();
+        const feed = FeedMessage.decode(new Uint8Array(buf));
+        const sample = feed.entity?.[0]?.vehicle;
+        console.log("[diag] feed entity[0] tripId:", sample?.trip?.tripId);
+        console.log("[diag] feed entity[0] routeId:", sample?.trip?.routeId);
+        console.log("[diag] feed total entities:", feed.entity?.length);
+      }
+    } catch (e) {
+      console.warn("[diag] vehicles failed:", e);
+    }
+
+    console.log(
+      "[diag] routeNames sample keys:",
+      Object.keys(routeNames).slice(0, 5)
+    );
+    console.log(
+      "[diag] tripRouteNameMap size before build:",
+      tripRouteNameMap.size
+    );
+    // ─────────────────────────────────────────────────────────────
+
+    // Build tripId→routeName map BEFORE fetching buses so labels are correct from the start
+    await fetchTripRouteNames(routeNames);
+
+    console.log(
+      "[diag] tripRouteNameMap size after build:",
+      tripRouteNameMap.size
+    );
+    console.log(
+      "[diag] tripRouteNameMap sample:",
+      [...tripRouteNameMap.entries()].slice(0, 3)
+    );
 
     await refreshBuses(routeNames, false);
 
