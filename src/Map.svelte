@@ -244,7 +244,7 @@
       iconAnchor: highlighted ? [9, 9] : [6, 6],
     });
   }
-
+  // REPLACE makeBusIcon entirely:
   function makeBusIcon(
     bearing,
     dimmed,
@@ -260,28 +260,32 @@
       : direction === "northbound"
         ? "orange"
         : "#00cfff";
+
+    // Convert bearing to radians and compute offset so label
+    // sits ~14px in front of the bus in its direction of travel
+    const rad = (rotation * Math.PI) / 180;
+    const dist = 14;
+    const dx = Math.sin(rad) * dist;
+    const dy = -Math.cos(rad) * dist;
+
     return L.divIcon({
       className: "",
-      html: `<div class="bus-marker-outer" style="opacity:${dimmed ? 0.2 : 1};transition:opacity 0.2s;">
-        <div class="bus-route-label">${routeName}</div>
-        <div class="bus-marker-wrap" style="
-          transform:${selected || highlighted ? "scale(1.4)" : "scale(1)"};
-          filter:${selected || highlighted ? `drop-shadow(0 0 0px ${glow}) drop-shadow(0 0 8px ${glow})` : "none"};
-          transition:filter 0.2s,transform 0.2s;">
-         <img src="${import.meta.env.BASE_URL}dublinbus.png"
-  class="bus-img"
-  style="
-    width:60px;
-    transform:rotate(${rotation - 90}deg) scaleX(-1)${flipped ? " scaleY(-1)" : ""}
-  "/>
-        </div>
-      </div>`,
-      iconSize: [24, 32],
-      iconAnchor: [12, 28],
-      popupAnchor: [0, -46],
+      html: `<div class="bus-marker-outer" style="opacity:${dimmed ? 0.2 : 1};transition:opacity 0.2s;position:relative;width:20px;height:20px;">
+      <div class="bus-marker-wrap" style="
+        position:absolute;top:0;left:0;
+        transform:${selected || highlighted ? "scale(1.4)" : "scale(1)"};
+        filter:${selected || highlighted ? `drop-shadow(0 0 0px ${glow}) drop-shadow(0 0 8px ${glow})` : "none"};
+        transition:filter 0.2s,transform 0.2s;">
+        <img src="${import.meta.env.BASE_URL}dublinbus.png" class="bus-img"
+          style="transform:rotate(${rotation - 90}deg) scaleX(-1)${flipped ? " scaleY(-1)" : ""}"/>
+      </div>
+      <div class="bus-route-label" style="position:absolute;top:50%;left:50%;transform:translate(calc(-50% + ${dx.toFixed(1)}px),calc(-50% + ${dy.toFixed(1)}px));pointer-events:none;">${routeName}</div>
+    </div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+      popupAnchor: [0, -20],
     });
   }
-
   // ── Data fetching ──────────────────────────────────────────────
   async function fetchRouteNames() {
     try {
@@ -521,6 +525,28 @@
       );
       applySearch();
     }
+  }
+
+  // ADD this new function anywhere near the other rendering helpers:
+  function refreshAllBearings() {
+    busData.forEach((entry) => {
+      const bearing = resolveBearing({
+        tripId: entry.tripId,
+        lat: entry.lat,
+        lng: entry.lng,
+      });
+      entry.bearing = bearing;
+      entry.marker.setIcon(
+        makeBusIcon(
+          bearing,
+          false,
+          false,
+          false,
+          getTripDirection(entry.tripId),
+          entry.routeName
+        )
+      );
+    });
   }
 
   async function fetchBuses(routeNames) {
@@ -1030,12 +1056,27 @@
     if (!entry) return;
     selectedRoute = entry.normalizedRoute;
     selectedTripId = arrival.tripId;
-    followingBus = true;
-    // Close the stop panel and zoom straight to the bus
-    clearSelectedStop();
-    map.setView([entry.lat, entry.lng], Math.max(map.getZoom(), 16), {
-      animate: true,
-    });
+    followingBus = false; // ← was true; follow only activates on direct bus click
+
+    const stopLat = +stopPanelStop.stop_lat;
+    const stopLng = +stopPanelStop.stop_lon;
+    const latDiff = Math.abs(entry.lat - stopLat);
+    const lngDiff = Math.abs(entry.lng - stopLng);
+    const radius = Math.max(latDiff, lngDiff * 0.6, 0.004) * 1.6;
+
+    map.fitBounds(
+      [
+        [stopLat - radius, stopLng - radius / 0.6],
+        [stopLat + radius, stopLng + radius / 0.6],
+      ],
+      {
+        paddingTopLeft: [60, 60],
+        paddingBottomRight: [60, 320],
+        animate: true,
+        duration: 0.6,
+      }
+    );
+
     applySearch();
   }
 
@@ -1188,6 +1229,7 @@
       fetchRouteStops(routeNames).then(() => {
         matchTripsToShapes();
         refilterBusesAfterShapeMatch();
+        refreshAllBearings(); // ← re-renders all markers with correct shape bearings
         applySearch();
       })
     );
@@ -1532,40 +1574,37 @@
     }
   }
 
-  /* ── Bus marker ── */
   :global(.bus-marker-outer) {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1px;
-    width: 44px;
-  }
-  :global(.bus-route-label) {
-    background: #1a73e8;
-    color: white;
-    font-size: 11px;
-    font-weight: 700;
-    padding: 1px 5px;
-    border-radius: 4px;
-    white-space: nowrap;
-    line-height: 1.4;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-    max-width: 44px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: center;
+    position: relative;
+    width: 20px;
+    height: 20px;
   }
   :global(.bus-marker-wrap) {
-    width: 40px;
-    height: 40px;
+    width: 20px;
+    height: 20px;
     display: flex;
     align-items: center;
     justify-content: center;
   }
   :global(.bus-img) {
-    width: 40px;
-    height: 40px;
+    width: 20px;
+    height: 20px;
     object-fit: contain;
+  }
+  :global(.bus-route-label) {
+    background: #0e0e0e;
+    color: #e8a020;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    border: 1px solid #2a2a2a;
+    white-space: nowrap;
+    line-height: 1.4;
+    letter-spacing: 0.05em;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
   }
   :global(.leaflet-tooltip.bus-label) {
     display: none;
