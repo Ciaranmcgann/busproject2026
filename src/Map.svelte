@@ -6,70 +6,47 @@
 
   const dispatch = createEventDispatcher();
 
-  export let searchTerm = "";
-  export let favourites = [];
-  export let favouritesMode = false;
-  export let showStops = true;
-  export let showBuses = true;
-  export let savedStops = [];
+  export let searchTerm = "",
+    favourites = [],
+    favouritesMode = false;
+  export let showStops = true,
+    showBuses = true,
+    savedStops = [];
 
-  let map;
-  let mapContainer;
+  let map, mapContainer, clusterGroup, locationMarker;
+  let shapeLayerGroup, stopLayerGroup, allStopsLayerGroup;
+  let selectedStopMarker,
+    isFetching = false,
+    FeedMessage;
 
   let busData = new Map();
-  let clusterGroup;
-  let locationMarker = null;
-
-  let shapeLayerGroup = null;
-  let isFetching = false;
-  let FeedMessage;
-  let buses = [];
-  let selectedRoute = "";
-
-  let allStops = [];
-  let stopLayerGroup = null;
-  let allStopsLayerGroup = null;
-
-  let lastUpdated = null;
-  let timeSinceUpdate = "";
-  let timerInterval;
+  let shapePoints = new Map(),
+    tripShapeMap = new Map();
+  let tripStopSequence = new Map(),
+    stopLatLng = new Map();
   let routeStopIds = new Map();
-  let tripRouteNameMap = new Map(); // tripId → short route name, built before first bus fetch
-  let tripSuffixToStaticId = new Map(); // numeric suffix → static trip_id (e.g. "1501" → "5552_1501")
+  let tripRouteNameMap = new Map();
+  let tripSuffixToStaticId = new Map();
 
-  // Resolve a live feed tripId (e.g. "5576_1501") to the static trip_id ("5552_1501")
-  // by matching on the numeric suffix. Falls back to the input if no match found.
-  function resolveStaticTripId(liveTripId) {
-    if (!liveTripId) return liveTripId;
-    if (tripStopSequence.has(liveTripId)) return liveTripId;
-    const suffix = liveTripId.split("_")[1];
-    if (suffix && tripSuffixToStaticId.has(suffix))
-      return tripSuffixToStaticId.get(suffix);
-    return liveTripId;
-  }
-
-  let shapePoints = new Map();
-  let tripShapeMap = new Map();
-  let tripStopSequence = new Map();
-  let stopLatLng = new Map();
-  let shouldAutoFit = false;
-  let selectedTripId = "";
-
-  let selectedStop = null;
-  let selectedStopMarker = null;
+  let buses = [],
+    allStops = [];
+  let selectedRoute = "",
+    selectedTripId = "",
+    selectedStop = null;
+  let stopPanelStop = null,
+    stopPanelArrivals = [],
+    stopPanelLoading = false;
   let incomingTripIds = new Set();
-
-  let stopPanelStop = null;
-  let stopPanelArrivals = [];
-  let stopPanelLoading = false;
-
-  // Rate limiting
-  let backoffDelay = 30000;
-  let lastManualRefresh = 0;
+  let lastUpdated = null,
+    timeSinceUpdate = "";
+  let shouldAutoFit = false;
+  let backoffDelay = 30000,
+    lastManualRefresh = 0;
+  let routeNamesGlobal = {};
+  let followingBus = false; // true when user double-clicked a bus to lock-follow it
 
   const STOPS_MIN_ZOOM = 14;
   const API = "https://bus-times.ciaranjmcgann.workers.dev";
-
   const DUBLIN_BOUNDS = {
     minLat: 53.14,
     maxLat: 53.46,
@@ -77,44 +54,25 @@
     maxLng: -6.0,
   };
 
-  function isInDublin(lat, lng) {
-    return (
-      lat >= DUBLIN_BOUNDS.minLat &&
-      lat <= DUBLIN_BOUNDS.maxLat &&
-      lng >= DUBLIN_BOUNDS.minLng &&
-      lng <= DUBLIN_BOUNDS.maxLng
-    );
-  }
+  // ── Utilities ──────────────────────────────────────────────────
+  const isInDublin = (lat, lng) =>
+    lat >= DUBLIN_BOUNDS.minLat &&
+    lat <= DUBLIN_BOUNDS.maxLat &&
+    lng >= DUBLIN_BOUNDS.minLng &&
+    lng <= DUBLIN_BOUNDS.maxLng;
 
-  function normalize(str) {
-    return (str || "").replace(/\s/g, "").toLowerCase();
-  }
+  const normalize = (str) => (str || "").replace(/\s/g, "").toLowerCase();
 
-  function timeToMins(t) {
+  const timeToMins = (t) => {
     if (!t) return null;
     const [h, m, s] = t.split(":").map(Number);
     return h * 60 + m + (s || 0) / 60;
-  }
+  };
 
-  function calcEstMinutes(stops, nearestIdx, targetIdx) {
-    const fromTime = timeToMins(stops[nearestIdx]?.arrival_time);
-    const toTime = timeToMins(stops[targetIdx]?.arrival_time);
-    if (fromTime !== null && toTime !== null && toTime > fromTime) {
-      return Math.round(toTime - fromTime);
-    }
-    return Math.round((targetIdx - nearestIdx) * 1.5);
-  }
-
-  // Always show seconds
-  function updateTimer() {
-    if (!lastUpdated) return;
-    const secs = Math.floor((Date.now() - lastUpdated) / 1000);
-    timeSinceUpdate = `Updated ${secs}s ago`;
-  }
+  const toRad = (d) => (d * Math.PI) / 180;
+  const toDeg = (r) => (r * 180) / Math.PI;
 
   function calculateBearing(lat1, lng1, lat2, lng2) {
-    const toRad = (d) => (d * Math.PI) / 180;
-    const toDeg = (r) => (r * 180) / Math.PI;
     const dLng = toRad(lng2 - lng1);
     const y = Math.sin(dLng) * Math.cos(toRad(lat2));
     const x =
@@ -123,8 +81,114 @@
     return (toDeg(Math.atan2(y, x)) + 360) % 360;
   }
 
+  function resolveStaticTripId(liveTripId) {
+    if (!liveTripId) return liveTripId;
+    if (tripStopSequence.has(liveTripId)) return liveTripId;
+    const suffix = liveTripId.split("_")[1];
+    return suffix && tripSuffixToStaticId.has(suffix)
+      ? tripSuffixToStaticId.get(suffix)
+      : liveTripId;
+  }
+
+  function calcEstMinutes(stops, nearestIdx, targetIdx) {
+    const from = timeToMins(stops[nearestIdx]?.arrival_time);
+    const to = timeToMins(stops[targetIdx]?.arrival_time);
+    return from !== null && to !== null && to > from
+      ? Math.round(to - from)
+      : Math.round((targetIdx - nearestIdx) * 1.5);
+  }
+
+  function updateTimer() {
+    if (!lastUpdated) return;
+    timeSinceUpdate = `Updated ${Math.floor((Date.now() - lastUpdated) / 1000)}s ago`;
+  }
+
+  // ── Bearing resolution ─────────────────────────────────────────
+  function nearestStopIdx(stops, lat, lng) {
+    let bestIdx = 0,
+      bestDist = Infinity;
+    for (let i = 0; i < stops.length; i++) {
+      const s = stopLatLng.get(stops[i].stop_id);
+      if (!s) continue;
+      const d = (s.lat - lat) ** 2 + (s.lng - lng) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  function getBearingFromStops(tripId, lat, lng) {
+    const stops =
+      tripStopSequence.get(resolveStaticTripId(tripId)) ||
+      tripStopSequence.get(tripId);
+    if (!stops || stops.length < 2) return null;
+    const i = nearestStopIdx(stops, lat, lng);
+    const j = Math.min(i + 1, stops.length - 1);
+    const from = stopLatLng.get(stops[i].stop_id);
+    const to = stopLatLng.get(stops[j].stop_id);
+    if (!from || !to || (from.lat === to.lat && from.lng === to.lng))
+      return null;
+    return calculateBearing(from.lat, from.lng, to.lat, to.lng);
+  }
+
+  function getBearingFromShape(shapeId, lat, lng) {
+    const pts = shapePoints.get(shapeId);
+    if (!pts || pts.length < 2) return null;
+    let best = null,
+      bestDist = Infinity;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const mid = {
+        lat: (pts[i].lat + pts[i + 1].lat) / 2,
+        lng: (pts[i].lng + pts[i + 1].lng) / 2,
+      };
+      const d = (mid.lat - lat) ** 2 + (mid.lng - lng) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        best = calculateBearing(
+          pts[i].lat,
+          pts[i].lng,
+          pts[i + 1].lat,
+          pts[i + 1].lng
+        );
+      }
+    }
+    return best;
+  }
+
+  function resolveBearing({ tripId, lat, lng }) {
+    const staticId = resolveStaticTripId(tripId);
+    const shapeId = tripShapeMap.get(staticId) || tripShapeMap.get(tripId);
+    if (shapeId) {
+      const shapeBearing = getBearingFromShape(shapeId, lat, lng);
+      if (shapeBearing !== null) return shapeBearing;
+    }
+    return getBearingFromStops(tripId, lat, lng) ?? 0;
+  }
+
+  // ── Shape distance filter ──────────────────────────────────────
+  // Returns the distance (in degrees, approx) from (lat, lng) to the nearest
+  // point on the bus's shape polyline. Returns 0 if no shape is loaded yet
+  // so that buses are never hidden just because shapes haven't arrived.
+  function distanceFromShape(tripId, lat, lng) {
+    const staticId = resolveStaticTripId(tripId);
+    const shapeId = tripShapeMap.get(staticId) || tripShapeMap.get(tripId);
+    const pts = shapeId ? shapePoints.get(shapeId) : null;
+    if (!pts || pts.length < 2) return 0; // no shape loaded yet → don't filter
+
+    let bestDist = Infinity;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const d = (pts[i].lat - lat) ** 2 + (pts[i].lng - lng) ** 2;
+      if (d < bestDist) bestDist = d;
+    }
+    return Math.sqrt(bestDist);
+  }
+
   function getTripDirection(tripId) {
-    const stops = tripStopSequence.get(tripId);
+    const stops =
+      tripStopSequence.get(resolveStaticTripId(tripId)) ||
+      tripStopSequence.get(tripId);
     if (!stops || stops.length < 2) return "unknown";
     const first = stopLatLng.get(stops[0].stop_id);
     const last = stopLatLng.get(stops[stops.length - 1].stop_id);
@@ -132,597 +196,460 @@
     return last.lat > first.lat ? "northbound" : "southbound";
   }
 
-  function getBearingFromStops(tripId, busLat, busLng) {
-    const stops = tripStopSequence.get(tripId);
-    if (!stops || stops.length < 2) return null;
-
-    let nearestIdx = 0;
-    let nearestDist = Infinity;
-
-    for (let i = 0; i < stops.length; i++) {
-      const s = stopLatLng.get(stops[i].stop_id);
-      if (!s) continue;
-      const dLat = s.lat - busLat;
-      const dLng = s.lng - busLng;
-      const dist = dLat * dLat + dLng * dLng;
-      if (dist < nearestDist) {
-        nearestDist = dist;
-        nearestIdx = i;
-      }
-    }
-
-    const nextIdx = Math.min(nearestIdx + 1, stops.length - 1);
-    const from = stopLatLng.get(stops[nearestIdx].stop_id);
-    const to = stopLatLng.get(stops[nextIdx].stop_id);
-
-    if (!from || !to) return null;
-    if (from.lat === to.lat && from.lng === to.lng) return null;
-
-    return calculateBearing(from.lat, from.lng, to.lat, to.lng);
-  }
-
-  function getBearingFromShape(shapeId, busLat, busLng) {
-    const points = shapePoints.get(shapeId);
-    if (!points || points.length < 2) return null;
-
-    let bestBearing = null;
-    let bestDist = Infinity;
-
-    for (let i = 0; i < points.length - 1; i++) {
-      const a = points[i];
-      const b = points[i + 1];
-      const midLat = (a.lat + b.lat) / 2;
-      const midLng = (a.lng + b.lng) / 2;
-      const dLat = midLat - busLat;
-      const dLng = midLng - busLng;
-      const dist = dLat * dLat + dLng * dLng;
-
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestBearing = calculateBearing(a.lat, a.lng, b.lat, b.lng);
-      }
-    }
-
-    return bestBearing;
-  }
-
-  function resolveBearing(newBus) {
-    const stopBearing = getBearingFromStops(
-      newBus.tripId,
-      newBus.lat,
-      newBus.lng
-    );
-    if (stopBearing !== null) return stopBearing;
-
-    const shapeId = tripShapeMap.get(newBus.tripId);
-    if (shapeId) {
-      const shapeBearing = getBearingFromShape(shapeId, newBus.lat, newBus.lng);
-      if (shapeBearing !== null) return shapeBearing;
-    }
-
-    return 0;
-  }
-
+  // ── Stop panel helpers ─────────────────────────────────────────
   function getIncomingTripsForStop(stopId) {
     const result = new Set();
-
     tripStopSequence.forEach((stops, staticTripId) => {
       const targetIdx = stops.findIndex((s) => s.stop_id === stopId);
       if (targetIdx === -1) return;
-
-      // Match live buses by resolving their feed tripId to the static tripId
       let liveBus = null;
       busData.forEach((bus) => {
         if (resolveStaticTripId(bus.tripId) === staticTripId) liveBus = bus;
       });
       if (!liveBus) return;
-
-      let nearestIdx = 0;
-      let nearestDist = Infinity;
-      for (let i = 0; i < stops.length; i++) {
-        const ll = stopLatLng.get(stops[i].stop_id);
-        if (!ll) continue;
-        const dLat = ll.lat - liveBus.lat;
-        const dLng = ll.lng - liveBus.lng;
-        const dist = dLat * dLat + dLng * dLng;
-        if (dist < nearestDist) {
-          nearestDist = dist;
-          nearestIdx = i;
-        }
-      }
-
-      if (nearestIdx < targetIdx) {
-        result.add(staticTripId); // FIX: was `tripId` (undefined) — should be `staticTripId`
-      }
+      const i = nearestStopIdx(stops, liveBus.lat, liveBus.lng);
+      if (i < targetIdx) result.add(staticTripId);
     });
-
     return result;
   }
 
-  // FIX: guard every removal with map.hasLayer() to prevent "Node cannot be found"
   function clearSelectedStop() {
-    selectedStop = null;
-    stopPanelStop = null;
+    selectedStop = stopPanelStop = null;
     stopPanelArrivals = [];
     incomingTripIds = new Set();
+    followingBus = false;
     if (selectedStopMarker) {
       if (map.hasLayer(selectedStopMarker)) map.removeLayer(selectedStopMarker);
       selectedStopMarker = null;
     }
   }
 
-  function fitBoundsWithPanel(bounds, opts = {}) {
-    const PANEL_PX = 320;
+  const isStopSaved = (stopId) => savedStops.some((s) => s.stop_id === stopId);
+  const toggleSaveStop = (stop) => dispatch("toggleSavedStop", stop);
+
+  function fitBoundsWithPanel(bounds) {
     map.fitBounds(bounds, {
       paddingTopLeft: [60, 60],
-      paddingBottomRight: [60, 60 + PANEL_PX],
+      paddingBottomRight: [60, 380],
       maxZoom: 16,
-      ...opts,
     });
   }
 
-  function isStopSaved(stopId) {
-    return savedStops.some((s) => s.stop_id === stopId);
-  }
-
-  function toggleSaveStop(stop) {
-    dispatch("toggleSavedStop", stop);
-  }
-
-  export function zoomToBus(tripId) {
-    const entry = [...busData.values()].find((b) => b.tripId === tripId);
-    if (!entry) return;
-
-    selectedRoute = entry.normalizedRoute;
-    selectedTripId = tripId;
-
-    if (selectedStop) {
-      const stopLat = parseFloat(selectedStop.stop_lat);
-      const stopLng = parseFloat(selectedStop.stop_lon);
-      const bounds = L.latLngBounds([entry.lat, entry.lng], [stopLat, stopLng]);
-      fitBoundsWithPanel(bounds);
-    } else {
-      map.setView([entry.lat, entry.lng], 16);
-    }
-
-    applySearch();
-  }
-
-  async function openStopPanel(stop) {
-    if (stopPanelStop && stopPanelStop.stop_id === stop.stop_id) {
-      clearSelectedStop();
-      applySearch();
-      return;
-    }
-
-    selectedStop = stop;
-    stopPanelStop = stop;
-    stopPanelArrivals = [];
-    stopPanelLoading = true;
-    selectedTripId = "";
-    selectedRoute = "";
-
-    const stopLat = parseFloat(stop.stop_lat);
-    const stopLng = parseFloat(stop.stop_lon);
-    setTimeout(() => {
-      const PANEL_PX = 320;
-      const zoom = Math.max(map.getZoom(), 16);
-      map.setView([stopLat, stopLng], zoom, { animate: true });
-      setTimeout(() => {
-        map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
-      }, 350);
-    }, 50);
-
-    applySearch();
-
-    try {
-      // Fetch schedules for any live bus trips not yet in tripStopSequence
-      const unfetchedTripIds = [...busData.values()]
-        .map((b) => b.tripId)
-        .filter((id) => id && !tripStopSequence.has(id));
-
-      await Promise.all(
-        unfetchedTripIds.map(async (liveTripId) => {
-          try {
-            // Resolve to static tripId for fetching and storing
-            const staticTripId = resolveStaticTripId(liveTripId);
-            if (tripStopSequence.has(staticTripId)) return;
-            const stops = await fetchTripSchedule(staticTripId);
-            if (!stops?.length) return;
-            const ordered = stops
-              .map((s) => ({
-                stop_id: s.stop_id,
-                seq: parseInt(s.stop_sequence),
-                arrival_time: s.arrival_time || s.departure_time || null,
-              }))
-              .sort((a, b) => a.seq - b.seq);
-            tripStopSequence.set(staticTripId, ordered);
-          } catch (e) {
-            console.warn("Failed to fetch trip", liveTripId, e);
-          }
-        })
-      );
-
-      // Compute incoming trips with full data
-      incomingTripIds = getIncomingTripsForStop(stop.stop_id);
-
-      await refreshStopArrivals(stop);
-    } catch (err) {
-      stopPanelArrivals = [];
-    } finally {
-      stopPanelLoading = false;
-    }
-  }
-
-  function handleArrivalClick(arrival) {
-    if (arrival.type !== "live" || !arrival.tripId) return;
-    const entry = [...busData.values()].find(
-      (b) => b.tripId === arrival.tripId
-    );
-    if (!entry) return;
-
-    selectedRoute = entry.normalizedRoute;
-    selectedTripId = arrival.tripId;
-
-    if (selectedStop) {
-      const stopLat = parseFloat(selectedStop.stop_lat);
-      const stopLng = parseFloat(selectedStop.stop_lon);
-      const bounds = L.latLngBounds([entry.lat, entry.lng], [stopLat, stopLng]);
-      fitBoundsWithPanel(bounds);
-    } else {
-      map.setView([entry.lat, entry.lng], 16);
-    }
-
-    applySearch();
-  }
-
-  async function fetchRouteNames() {
-    try {
-      const res = await fetch(`${API}/routes`);
-      const routes = await res.json();
-
-      // FIX: log a sample to help debug key mismatches in future
-      if (routes.length) {
-        console.log("[routes] sample entry:", routes[0]);
-      }
-
-      const lookup = {};
-      for (const r of routes) {
-        if (r.route_id && r.route_short_name) {
-          const key = r.route_id.trim();
-          const name = r.route_short_name.trim();
-          // Index by full route_id
-          lookup[key] = name;
-          // Also index by the leading segment before any dash (e.g. "60" from "60-1-b12-1")
-          const shortKey = key.split("-")[0];
-          if (!lookup[shortKey]) lookup[shortKey] = name;
-        }
-      }
-      return lookup;
-    } catch (e) {
-      console.warn("Could not load route names", e);
-      return {};
-    }
-  }
-
-  async function fetchStops() {
-    try {
-      const res = await fetch(`${API}/static/stops.json`);
-      const data = await res.json();
-      const stopsArray = Array.isArray(data) ? data : Object.values(data);
-
-      allStops = stopsArray.filter(
-        (s) =>
-          s.stop_lat &&
-          s.stop_lon &&
-          isInDublin(parseFloat(s.stop_lat), parseFloat(s.stop_lon))
-      );
-
-      for (const s of stopsArray) {
-        if (s.stop_id && s.stop_lat && s.stop_lon) {
-          stopLatLng.set(s.stop_id, {
-            lat: parseFloat(s.stop_lat),
-            lng: parseFloat(s.stop_lon),
-          });
-        }
-      }
-
-      dispatch("stopsLoaded", allStops);
-    } catch (e) {
-      console.warn("Could not load stops", e);
-    }
-  }
-
-  async function fetchShapes() {
-    try {
-      const shapesRes = await fetch(`${API}/static/shapes.txt`);
-      const text = await shapesRes.text();
-      const lines = text.trim().split("\n");
-      const headers = lines[0].split(",").map((h) => h.trim());
-      const idIdx = headers.indexOf("shape_id");
-      const latIdx = headers.indexOf("shape_pt_lat");
-      const lngIdx = headers.indexOf("shape_pt_lon");
-      const seqIdx = headers.indexOf("shape_pt_sequence");
-
-      const raw = new Map();
-      for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(",");
-        const id = cols[idIdx]?.trim();
-        if (!id) continue;
-        if (!raw.has(id)) raw.set(id, []);
-        raw.get(id).push({
-          seq: parseInt(cols[seqIdx]),
-          lat: parseFloat(cols[latIdx]),
-          lng: parseFloat(cols[lngIdx]),
-        });
-      }
-
-      raw.forEach((points, id) => {
-        shapePoints.set(
-          id,
-          points.sort((a, b) => a.seq - b.seq)
-        );
-      });
-    } catch (e) {
-      console.warn("Could not load shapes", e);
-    }
-  }
-
-  async function fetchTripSchedule(tripId) {
-    const cacheKey = `trip-${tripId}`;
-    try {
-      const cached = sessionStorage.getItem(cacheKey);
-      if (cached) return JSON.parse(cached);
-    } catch (_) {}
-
-    const res = await fetch(`${API}/schedule/${tripId}`);
-    if (!res.ok) return null;
-    const stops = await res.json();
-
-    try {
-      sessionStorage.setItem(cacheKey, JSON.stringify(stops));
-    } catch (_) {}
-
-    return stops;
-  }
-
-  // Fetch trips early so tripRouteNameMap is ready before the first bus fetch
-  // Keys are stored both as full trip_id AND as the numeric suffix after "_"
-  // because the realtime feed uses a different agency prefix than static data
-  async function fetchTripRouteNames(routeNames) {
-    try {
-      const tripsRes = await fetch(`${API}/trips`);
-      const tripsJson = await tripsRes.json();
-      const tripsArray = Array.isArray(tripsJson)
-        ? tripsJson
-        : Object.entries(tripsJson.trips).map(([trip_id, t]) => ({
-            trip_id,
-            ...t,
-          }));
-
-      for (const trip of tripsArray) {
-        const shortName = routeNames[trip.route_id?.trim()];
-        if (!shortName) continue;
-        // Index by full trip_id
-        tripRouteNameMap.set(trip.trip_id, shortName);
-        // Also index by the numeric suffix after "_" (e.g. "1501" from "5552_1501")
-        // so we can match realtime feed IDs that use a different prefix (e.g. "5576_1501")
-        const suffix = trip.trip_id?.split("_")[1];
-        if (suffix) {
-          tripRouteNameMap.set(suffix, shortName);
-          // Map suffix → full static trip_id so live tripIds can be resolved to static ones
-          tripSuffixToStaticId.set(suffix, trip.trip_id);
-        }
-        if (trip.trip_id && trip.shape_id)
-          tripShapeMap.set(trip.trip_id, trip.shape_id);
-      }
-      console.log(`[tripRouteNameMap] ${tripRouteNameMap.size} entries`);
-    } catch (e) {
-      console.warn("Could not build tripRouteNameMap", e);
-    }
-  }
-
-  async function fetchRouteStops(routeNames) {
-    try {
-      const tripsRes = await fetch(`${API}/trips`);
-      const tripsJson = await tripsRes.json();
-
-      const tripsArray = Array.isArray(tripsJson)
-        ? tripsJson
-        : Object.entries(tripsJson.trips).map(([trip_id, t]) => ({
-            trip_id,
-            ...t,
-          }));
-
-      const tripToNormalizedRoute = new Map();
-      for (const trip of tripsArray) {
-        const shortName = routeNames[trip.route_id?.trim()];
-        if (shortName) {
-          tripToNormalizedRoute.set(trip.trip_id, normalize(shortName));
-          tripRouteNameMap.set(trip.trip_id, shortName);
-          const suffix = trip.trip_id?.split("_")[1];
-          if (suffix) tripRouteNameMap.set(suffix, shortName);
-        }
-        if (trip.trip_id && trip.shape_id)
-          tripShapeMap.set(trip.trip_id, trip.shape_id);
-      }
-
-      routeStopIds = new Map();
-      tripStopSequence = new Map();
-
-      const activeTripIds = [
-        ...new Set(
-          buses
-            .map((b) => b.tripId)
-            .filter((id) => id && tripToNormalizedRoute.has(id))
-        ),
-      ];
-
-      const CONCURRENCY = 10;
-      for (let i = 0; i < activeTripIds.length; i += CONCURRENCY) {
-        const batch = activeTripIds.slice(i, i + CONCURRENCY);
-        await Promise.all(
-          batch.map(async (tripId) => {
-            try {
-              const stops = await fetchTripSchedule(tripId);
-              if (!stops || !stops.length) return;
-
-              const normalizedRoute = tripToNormalizedRoute.get(tripId);
-              if (!normalizedRoute) return;
-
-              if (!routeStopIds.has(normalizedRoute))
-                routeStopIds.set(normalizedRoute, new Set());
-
-              const orderedStops = stops
-                .map((s) => ({
-                  stop_id: s.stop_id,
-                  seq: parseInt(s.stop_sequence),
-                  arrival_time: s.arrival_time || s.departure_time || null,
-                }))
-                .sort((a, b) => a.seq - b.seq);
-
-              tripStopSequence.set(tripId, orderedStops);
-              for (const s of orderedStops)
-                routeStopIds.get(normalizedRoute).add(s.stop_id);
-            } catch (err) {
-              console.warn(`Failed trip ${tripId}`, err);
-            }
-          })
-        );
-      }
-    } catch (e) {
-      console.warn("Could not load route stops", e);
-    }
-  }
-
+  // ── Icons ──────────────────────────────────────────────────────
   function makeStopIcon(highlighted = false) {
     return L.divIcon({
       className: "",
       html: `<div class="stop-marker${highlighted ? " stop-marker-highlighted" : ""}"></div>`,
       iconSize: highlighted ? [18, 18] : [12, 12],
       iconAnchor: highlighted ? [9, 9] : [6, 6],
-      popupAnchor: [0, -8],
     });
   }
 
-  function renderAllStops() {
-    if (!allStopsLayerGroup) {
-      allStopsLayerGroup = L.layerGroup().addTo(map);
+  function makeBusIcon(
+    bearing,
+    dimmed,
+    selected,
+    highlighted,
+    direction,
+    routeName = ""
+  ) {
+    const rotation = bearing || 0;
+    const flipped = rotation > 180;
+    const glow = highlighted
+      ? "#00e676"
+      : direction === "northbound"
+        ? "orange"
+        : "#00cfff";
+    return L.divIcon({
+      className: "",
+      html: `<div class="bus-marker-outer" style="opacity:${dimmed ? 0.2 : 1};transition:opacity 0.2s;">
+        <div class="bus-route-label">${routeName}</div>
+        <div class="bus-marker-wrap" style="
+          transform:${selected || highlighted ? "scale(1.4)" : "scale(1)"};
+          filter:${selected || highlighted ? `drop-shadow(0 0 0px ${glow}) drop-shadow(0 0 8px ${glow})` : "none"};
+          transition:filter 0.2s,transform 0.2s;">
+         <img src="${import.meta.env.BASE_URL}dublinbus.png"
+  class="bus-img"
+  style="
+    width:60px;
+    transform:rotate(${rotation - 90}deg) scaleX(-1)${flipped ? " scaleY(-1)" : ""}
+  "/>
+        </div>
+      </div>`,
+      iconSize: [24, 32],
+      iconAnchor: [12, 28],
+      popupAnchor: [0, -46],
+    });
+  }
+
+  // ── Data fetching ──────────────────────────────────────────────
+  async function fetchRouteNames() {
+    try {
+      const routes = await fetch(`${API}/routes`).then((r) => r.json());
+      return routes.reduce((acc, r) => {
+        if (!r.route_id || !r.route_short_name) return acc;
+        const key = r.route_id.trim(),
+          name = r.route_short_name.trim();
+        acc[key] = name;
+        const shortKey = key.split("-")[0];
+        if (!acc[shortKey]) acc[shortKey] = name;
+        return acc;
+      }, {});
+    } catch {
+      return {};
+    }
+  }
+
+  async function fetchStops() {
+    try {
+      const data = await fetch(`${API}/static/stops.json`).then((r) =>
+        r.json()
+      );
+      const arr = Array.isArray(data) ? data : Object.values(data);
+      allStops = arr.filter(
+        (s) => s.stop_lat && s.stop_lon && isInDublin(+s.stop_lat, +s.stop_lon)
+      );
+      for (const s of arr) {
+        if (s.stop_id && s.stop_lat && s.stop_lon)
+          stopLatLng.set(s.stop_id, { lat: +s.stop_lat, lng: +s.stop_lon });
+      }
+      dispatch("stopsLoaded", allStops);
+    } catch {
+      console.warn("Could not load stops");
+    }
+  }
+
+  async function fetchShapes() {
+    try {
+      const text = await fetch(`${API}/static/shapes.txt`).then((r) =>
+        r.text()
+      );
+      const clean = text
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/^\uFEFF/, "");
+      const [header, ...lines] = clean.trim().split("\n");
+      const h = header.split(",").map((x) => x.trim().replace(/^"|"$/g, ""));
+      const [idIdx, latIdx, lngIdx, seqIdx] = [
+        "shape_id",
+        "shape_pt_lat",
+        "shape_pt_lon",
+        "shape_pt_sequence",
+      ].map((k) => h.indexOf(k));
+      if ([idIdx, latIdx, lngIdx, seqIdx].includes(-1)) {
+        console.warn("[shapes] missing columns, headers:", h);
+        return;
+      }
+      const raw = new Map();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const c = line.split(",");
+        const id = c[idIdx]?.trim().replace(/^"|"$/g, "");
+        const lat = parseFloat(c[latIdx]);
+        const lng = parseFloat(c[lngIdx]);
+        const seq = parseInt(c[seqIdx]);
+        if (!id || isNaN(lat) || isNaN(lng) || isNaN(seq)) continue;
+        if (!raw.has(id)) raw.set(id, []);
+        raw.get(id).push({ seq, lat, lng });
+      }
+      raw.forEach((pts, id) =>
+        shapePoints.set(
+          id,
+          pts.sort((a, b) => a.seq - b.seq)
+        )
+      );
+      console.log(`[shapes] loaded ${shapePoints.size} shapes`);
+      if (selectedTripId) applySearch();
+    } catch (e) {
+      console.warn("Could not load shapes", e);
+    }
+  }
+
+  async function fetchTripSchedule(tripId) {
+    const key = `trip-${tripId}`;
+    try {
+      const c = sessionStorage.getItem(key);
+      if (c) return JSON.parse(c);
+    } catch {}
+    const res = await fetch(`${API}/schedule/${tripId}`);
+    if (!res.ok) return null;
+    const stops = await res.json();
+    try {
+      sessionStorage.setItem(key, JSON.stringify(stops));
+    } catch {}
+    return stops;
+  }
+
+  function indexTrips(tripsJson, routeNames) {
+    const arr = Array.isArray(tripsJson)
+      ? tripsJson
+      : Object.entries(tripsJson.trips ?? tripsJson).map(([trip_id, t]) => ({
+          trip_id,
+          ...t,
+        }));
+
+    for (const trip of arr) {
+      const name = routeNames[trip.route_id?.trim()];
+      if (name) {
+        tripRouteNameMap.set(trip.trip_id, name);
+        const suffix = trip.trip_id?.split("_")[1];
+        if (suffix) {
+          tripRouteNameMap.set(suffix, name);
+          tripSuffixToStaticId.set(suffix, trip.trip_id);
+        }
+      }
     }
 
+    return arr;
+  }
+
+  async function fetchTripRouteNames(routeNames) {
+    try {
+      indexTrips(await fetch(`${API}/trips`).then((r) => r.json()), routeNames);
+    } catch (e) {
+      console.warn("Could not build tripRouteNameMap", e);
+    }
+  }
+
+  function matchTripsToShapes() {
+    if (!shapePoints.size || !stopLatLng.size) return;
+
+    const shapeStarts = [];
+    shapePoints.forEach((pts, shapeId) => {
+      if (pts.length)
+        shapeStarts.push({ shapeId, lat: pts[0].lat, lng: pts[0].lng });
+    });
+
+    tripStopSequence.forEach((stops, tripId) => {
+      if (tripShapeMap.has(tripId)) return;
+      let firstLL = null;
+      for (const s of stops) {
+        firstLL = stopLatLng.get(s.stop_id);
+        if (firstLL) break;
+      }
+      if (!firstLL) return;
+
+      let bestShape = null,
+        bestDist = Infinity;
+      for (const { shapeId, lat, lng } of shapeStarts) {
+        const d = (lat - firstLL.lat) ** 2 + (lng - firstLL.lng) ** 2;
+        if (d < bestDist) {
+          bestDist = d;
+          bestShape = shapeId;
+        }
+      }
+      if (bestShape) tripShapeMap.set(tripId, bestShape);
+    });
+
+    console.log(
+      "[shapes] matched trips→shapes, tripShapeMap size:",
+      tripShapeMap.size
+    );
+    if (selectedTripId) applySearch();
+  }
+
+  async function fetchRouteStops(routeNames) {
+    try {
+      const tripsArr = indexTrips(
+        await fetch(`${API}/trips`).then((r) => r.json()),
+        routeNames
+      );
+      const tripToRoute = new Map();
+      for (const trip of tripsArr) {
+        const name = routeNames[trip.route_id?.trim()];
+        if (name) tripToRoute.set(trip.trip_id, normalize(name));
+      }
+
+      routeStopIds = new Map();
+
+      // Collect all live trip IDs, falling back to all known trip IDs if buses
+      // haven't loaded yet (shouldn't happen, but defensive)
+      const liveTripIds = buses.map((b) => b.tripId).filter(Boolean);
+      const active = [
+        ...new Set(liveTripIds.length ? liveTripIds : [...tripToRoute.keys()]),
+      ];
+
+      for (let i = 0; i < active.length; i += 10) {
+        await Promise.all(
+          active.slice(i, i + 10).map(async (tripId) => {
+            const sid = resolveStaticTripId(tripId);
+            if (tripStopSequence.has(sid)) return; // already loaded
+            const stops = await fetchTripSchedule(sid).catch(() => null);
+            if (!stops?.length) return;
+            const nr = tripToRoute.get(tripId) || tripToRoute.get(sid);
+            if (nr) {
+              if (!routeStopIds.has(nr)) routeStopIds.set(nr, new Set());
+              for (const s of stops) routeStopIds.get(nr).add(s.stop_id);
+            }
+            const ordered = stops
+              .map((s) => ({
+                stop_id: s.stop_id,
+                seq: +s.stop_sequence,
+                arrival_time: s.arrival_time || s.departure_time || null,
+              }))
+              .sort((a, b) => a.seq - b.seq);
+            tripStopSequence.set(sid, ordered);
+          })
+        );
+      }
+      console.log(
+        "[fetchRouteStops] tripStopSequence size:",
+        tripStopSequence.size
+      );
+    } catch {
+      console.warn("Could not load route stops");
+    }
+  }
+
+  // Re-evaluate all buses currently in busData against the shape filter.
+  // Called after shapes are matched so buses that were admitted before shapes
+  // were ready get a second chance to be culled if they're off-route.
+  function refilterBusesAfterShapeMatch() {
+    if (!busData.size) return;
+    let removed = 0;
+    busData.forEach((entry, id) => {
+      const dist = distanceFromShape(entry.tripId, entry.lat, entry.lng);
+      if (dist > 0.001) {
+        clusterGroup.removeLayer(entry.marker);
+        busData.delete(id);
+        removed++;
+      }
+    });
+    if (removed > 0) {
+      console.log(
+        `[filter] removed ${removed} off-route buses after shape match`
+      );
+      applySearch();
+    }
+  }
+
+  async function fetchBuses(routeNames) {
+    try {
+      const res = await fetch(`${API}/vehicles`);
+      if (res.status === 429) {
+        backoffDelay = Math.min(backoffDelay * 2, 120000);
+        return { buses: [], feedTimestamp: null };
+      }
+      backoffDelay = 30000;
+      if (!res.ok) return { buses: [], feedTimestamp: null };
+      const feed = FeedMessage.decode(new Uint8Array(await res.arrayBuffer()));
+      const feedTimestamp = feed.header?.timestamp
+        ? +feed.header.timestamp * 1000
+        : null;
+      const result = feed.entity
+        .filter((e) => e.vehicle?.position)
+        .map(({ id, vehicle: v }) => {
+          const routeId = v.trip?.routeId || "",
+            tripId = v.trip?.tripId || "";
+          const suffix = tripId.split("_")[1] || "";
+          const routeName =
+            tripRouteNameMap.get(tripId) ||
+            tripRouteNameMap.get(suffix) ||
+            routeNames[routeId] ||
+            "N/A";
+          return {
+            id: v.vehicle?.id || v.vehicle?.label || id,
+            routeName,
+            tripId,
+            lat: v.position.latitude,
+            lng: v.position.longitude,
+          };
+        })
+        .filter((b) => isInDublin(b.lat, b.lng));
+      return { buses: result, feedTimestamp };
+    } catch {
+      return { buses: [], feedTimestamp: null };
+    }
+  }
+
+  // ── Rendering ──────────────────────────────────────────────────
+  function renderAllStops() {
+    allStopsLayerGroup ||= L.layerGroup().addTo(map);
     allStopsLayerGroup.clearLayers();
-
-    if (stopPanelStop) return;
-
-    if (!showStops || map.getZoom() < STOPS_MIN_ZOOM) return;
-
-    const stopsToShow = favouritesMode
+    if (stopPanelStop || !showStops || map.getZoom() < STOPS_MIN_ZOOM) return;
+    const src = favouritesMode
       ? allStops.filter((s) =>
           savedStops.some((ss) => ss.stop_id === s.stop_id)
         )
       : allStops;
-
     const bounds = map.getBounds().pad(0.05);
-
-    stopsToShow.forEach((stop) => {
-      const lat = parseFloat(stop.stop_lat);
-      const lng = parseFloat(stop.stop_lon);
-      if (!bounds.contains([lat, lng])) return;
-
-      const marker = L.marker([lat, lng], { icon: makeStopIcon(false) });
-
-      marker.on("click", (e) => {
+    for (const stop of src) {
+      const lat = +stop.stop_lat,
+        lng = +stop.stop_lon;
+      if (!bounds.contains([lat, lng])) continue;
+      const m = L.marker([lat, lng], { icon: makeStopIcon() });
+      m.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
         openStopPanel(stop);
       });
-
-      allStopsLayerGroup.addLayer(marker);
-    });
+      allStopsLayerGroup.addLayer(m);
+    }
   }
 
-  function showStopsForTrip(tripId) {
-    if (stopLayerGroup) stopLayerGroup.clearLayers();
-    else stopLayerGroup = L.layerGroup().addTo(map);
+  function showStopsForTrip(rawTripId) {
+    stopLayerGroup ||= L.layerGroup().addTo(map);
+    shapeLayerGroup ||= L.layerGroup().addTo(map);
+    stopLayerGroup.clearLayers();
+    shapeLayerGroup.clearLayers();
+    if (!rawTripId) return;
 
-    if (shapeLayerGroup) shapeLayerGroup.clearLayers();
-    else shapeLayerGroup = L.layerGroup().addTo(map);
+    const tripId = resolveStaticTripId(rawTripId);
+    const stopsForTrip =
+      tripStopSequence.get(tripId) || tripStopSequence.get(rawTripId);
+    if (!stopsForTrip?.length) return;
 
-    if (!tripId) return;
-
-    const stopsForTrip = tripStopSequence.get(tripId);
-    if (!stopsForTrip || stopsForTrip.length === 0) return;
-
-    const direction = getTripDirection(tripId);
-    const isNorthbound = direction === "northbound";
-    const lineColor = isNorthbound ? "#ff8c00" : "#00cfff";
-    const arrowColor = isNorthbound ? "#ff8c00" : "#00cfff";
-
+    const isNorth = getTripDirection(tripId) === "northbound";
+    const lineColor = isNorth ? "#ff8c00" : "#00cfff";
     const bounds = map.getBounds().pad(0.1);
 
-    const orderedStops = stopsForTrip
+    const ordered = stopsForTrip
       .map((s) => {
         const stop = allStops.find((st) => st.stop_id === s.stop_id);
-        if (!stop) return null;
-        return {
-          ...stop,
-          lat: parseFloat(stop.stop_lat),
-          lng: parseFloat(stop.stop_lon),
-        };
+        return stop
+          ? { ...stop, lat: +stop.stop_lat, lng: +stop.stop_lon }
+          : null;
       })
       .filter(Boolean);
 
-    if (orderedStops.length >= 2) {
-      const shapeId = tripShapeMap.get(tripId);
+    if (ordered.length >= 2) {
+      const staticId = resolveStaticTripId(tripId);
+      const shapeId =
+        tripShapeMap.get(staticId) ||
+        tripShapeMap.get(tripId) ||
+        tripShapeMap.get(rawTripId);
       const shape = shapeId ? shapePoints.get(shapeId) : null;
+      const useShape = shape && shape.length >= 2;
 
-      if (shape && shape.length >= 2) {
-        L.polyline(
-          shape.map((p) => [p.lat, p.lng]),
-          {
-            color: lineColor,
-            weight: 3,
-            opacity: 0.6,
-            lineJoin: "round",
-            lineCap: "round",
-            dashArray: "6 4",
-          }
-        ).addTo(shapeLayerGroup);
-      } else {
-        L.polyline(
-          orderedStops.map((s) => [s.lat, s.lng]),
-          {
-            color: lineColor,
-            weight: 3,
-            opacity: 0.6,
-            lineJoin: "round",
-            lineCap: "round",
-            dashArray: "6 4",
-          }
-        ).addTo(shapeLayerGroup);
-      }
+      console.log("[route] rawTripId:", rawTripId, "→ staticId:", staticId);
+      const polyPts = useShape
+        ? shape.map((p) => [p.lat, p.lng])
+        : ordered.map((s) => [s.lat, s.lng]);
+      L.polyline(polyPts, {
+        color: lineColor,
+        weight: 3,
+        opacity: 0.6,
+        dashArray: "6 4",
+        lineJoin: "round",
+        lineCap: "round",
+      }).addTo(shapeLayerGroup);
 
-      for (let i = 0; i < orderedStops.length - 1; i++) {
-        const from = orderedStops[i];
-        const to = orderedStops[i + 1];
-        const bearing = calculateBearing(from.lat, from.lng, to.lat, to.lng);
-        const midLat = (from.lat + to.lat) / 2;
-        const midLng = (from.lng + to.lng) / 2;
-
-        const arrowIcon = L.divIcon({
-          className: "",
-          html: `<svg width="20" height="20" viewBox="0 0 20 20"
-            style="transform: rotate(${bearing}deg); display: block;"
-            xmlns="http://www.w3.org/2000/svg">
-            <polygon points="10,2 17,16 10,12 3,16"
-              fill="${arrowColor}" fill-opacity="0.9"
-              stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
-          </svg>`,
-          iconSize: [20, 20],
-          iconAnchor: [10, 10],
-        });
-
-        L.marker([midLat, midLng], {
-          icon: arrowIcon,
+      const arrowSrc = useShape
+        ? shape
+        : ordered.map((s) => ({ lat: s.lat, lng: s.lng }));
+      const step = useShape
+        ? Math.max(1, Math.floor(arrowSrc.length / Math.min(ordered.length, 8)))
+        : 1;
+      for (let i = 0; i < arrowSrc.length - 1; i += step) {
+        const a = arrowSrc[i],
+          b = arrowSrc[Math.min(i + step, arrowSrc.length - 1)];
+        const bearing = calculateBearing(a.lat, a.lng, b.lat, b.lng);
+        L.marker([(a.lat + b.lat) / 2, (a.lng + b.lng) / 2], {
+          icon: L.divIcon({
+            className: "",
+            html: `<svg width="20" height="20" viewBox="0 0 20 20" style="transform:rotate(${bearing}deg);display:block" xmlns="http://www.w3.org/2000/svg"><polygon points="10,2 17,16 10,12 3,16" fill="${lineColor}" fill-opacity="0.9" stroke="white" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
+            iconSize: [20, 20],
+            iconAnchor: [10, 10],
+          }),
           interactive: false,
           zIndexOffset: -100,
         }).addTo(shapeLayerGroup);
@@ -730,140 +657,27 @@
     }
 
     if (!stopPanelStop) {
-      orderedStops.forEach((stop) => {
-        if (!bounds.contains([stop.lat, stop.lng])) return;
-        const marker = L.marker([stop.lat, stop.lng], {
-          icon: makeStopIcon(false),
-        });
-        marker.on("click", (e) => {
+      for (const stop of ordered) {
+        if (!bounds.contains([stop.lat, stop.lng])) continue;
+        const m = L.marker([stop.lat, stop.lng], { icon: makeStopIcon() });
+        m.on("click", (e) => {
           L.DomEvent.stopPropagation(e);
           openStopPanel(stop);
         });
-        stopLayerGroup.addLayer(marker);
-      });
-    }
-  }
-
-  function makeBusIcon(
-    bearing,
-    dimmed = false,
-    selected = false,
-    highlighted = false,
-    direction = "unknown"
-  ) {
-    const rotation = bearing || 0;
-    const flipped = rotation > 180 && rotation < 360;
-    const glowColor = highlighted
-      ? "#00e676"
-      : direction === "northbound"
-        ? "orange"
-        : "#00cfff";
-    const selectedFilter = `drop-shadow(0 0 0px ${glowColor}) drop-shadow(0 0 8px ${glowColor})`;
-    return L.divIcon({
-      className: "",
-      html: `
-        <div class="bus-marker-wrap" style="
-          opacity: ${dimmed ? 0.2 : 1};
-          transform: ${selected || highlighted ? "scale(1.4)" : "scale(1)"};
-          filter: ${selected || highlighted ? selectedFilter : "none"};
-          transition: opacity 0.2s, filter 0.2s;
-        ">
-          <img
-            src="${import.meta.env.BASE_URL}bus.png"
-            class="bus-img"
-            style="transform: rotate(${rotation - 90}deg) scaleX(-1) ${flipped ? "scaleY(-1)" : ""};"
-          />
-        </div>`,
-      iconSize: [40, 40],
-      iconAnchor: [20, 20],
-      popupAnchor: [0, -20],
-    });
-  }
-
-  async function fetchBuses(routeNames) {
-    try {
-      const res = await fetch(`${API}/vehicles`);
-
-      if (res.status === 429) {
-        backoffDelay = Math.min(backoffDelay * 2, 120000);
-        console.warn(`Rate limited. Backing off to ${backoffDelay / 1000}s`);
-        return { buses: [], feedTimestamp: null };
+        stopLayerGroup.addLayer(m);
       }
-
-      backoffDelay = 30000; // reset on success
-
-      if (!res.ok) return { buses: [], feedTimestamp: null };
-      const buffer = await res.arrayBuffer();
-      const feed = FeedMessage.decode(new Uint8Array(buffer));
-
-      const feedTimestamp = feed.header?.timestamp
-        ? Number(feed.header.timestamp) * 1000
-        : null;
-
-      const buses = feed.entity
-        .map((e) => ({ id: e.id, vehicle: e.vehicle }))
-        .filter(({ vehicle: v }) => v && v.position)
-        .map(({ id, vehicle: v }) => {
-          const routeId = v.trip?.routeId || "";
-          const tripId = v.trip?.tripId || "";
-          // Try full tripId, then just the numeric suffix (handles agency prefix mismatch
-          // between realtime feed e.g. "5576_1501" and static data e.g. "5552_1501"),
-          // then fall back to routeId lookup
-          const tripSuffix = tripId.split("_")[1] || "";
-          const routeName =
-            tripRouteNameMap.get(tripId) ||
-            tripRouteNameMap.get(tripSuffix) ||
-            routeNames[routeId] ||
-            "N/A";
-          const stableId = v.vehicle?.id || v.vehicle?.label || id;
-          return {
-            id: stableId,
-            routeName,
-            tripId,
-            lat: v.position.latitude,
-            lng: v.position.longitude,
-          };
-        })
-        .filter((bus) => isInDublin(bus.lat, bus.lng));
-
-      return { buses, feedTimestamp };
-    } catch (err) {
-      console.error("Fetch buses failed:", err);
-      return { buses: [], feedTimestamp: null };
     }
   }
 
-  function shouldShow(normalizedRoute) {
-    const term = normalize(searchTerm);
-    const matchesSearch = !searchTerm || normalizedRoute === term;
-    const matchesFavourites =
-      !favouritesMode || favourites.includes(normalizedRoute);
-    return matchesSearch && matchesFavourites;
-  }
-
-  function shouldShowForStop(normalizedRoute) {
-    const term = normalize(searchTerm);
-    return !searchTerm || normalizedRoute === term;
-  }
-
-  function isNearViewport(lat, lng) {
-    const bounds = map.getBounds().pad(0.3);
-    return bounds.contains([lat, lng]);
-  }
-
-  // FIX: guard with map.hasLayer() before removing/re-adding the selected stop marker
   function ensureSelectedStopMarker() {
     if (!selectedStop) return;
-
-    const lat = parseFloat(selectedStop.stop_lat);
-    const lng = parseFloat(selectedStop.stop_lon);
-
+    const lat = +selectedStop.stop_lat,
+      lng = +selectedStop.stop_lon;
     if (selectedStopMarker && map.hasLayer(selectedStopMarker)) {
       selectedStopMarker.setIcon(makeStopIcon(true));
     } else {
-      if (selectedStopMarker && map.hasLayer(selectedStopMarker)) {
+      if (selectedStopMarker && map.hasLayer(selectedStopMarker))
         map.removeLayer(selectedStopMarker);
-      }
       selectedStopMarker = L.marker([lat, lng], {
         icon: makeStopIcon(true),
         zIndexOffset: 500,
@@ -877,280 +691,386 @@
 
   function applySearch() {
     if (!map || !clusterGroup) return;
-
-    const visibleMarkers = [];
-    const hasSelectedStop = selectedStop !== null;
-    const hasSelectedRoute = !!selectedRoute;
+    const visibleMarkers = [],
+      hasStop = !!selectedStop,
+      hasRoute = !!selectedRoute;
 
     busData.forEach((bus) => {
+      const isFollowed = followingBus && bus.tripId === selectedTripId;
+
+      // When following a specific bus, hide everything else completely
+      if (followingBus && !isFollowed) {
+        if (clusterGroup.hasLayer(bus.marker))
+          clusterGroup.removeLayer(bus.marker);
+        return;
+      }
+
       const visible =
         showBuses &&
-        (hasSelectedStop
-          ? shouldShowForStop(bus.normalizedRoute)
+        (hasStop
+          ? normalize(bus.normalizedRoute).includes(normalize(searchTerm)) ||
+            !searchTerm
           : shouldShow(bus.normalizedRoute));
-      const inViewport = isNearViewport(bus.lat, bus.lng);
+      const inViewport = map.getBounds().pad(0.3).contains([bus.lat, bus.lng]);
       const isIncoming = incomingTripIds.has(resolveStaticTripId(bus.tripId));
-      const isSelectedBus =
-        hasSelectedRoute && bus.normalizedRoute === normalize(selectedRoute);
-
-      let dimmed = false;
-      if (hasSelectedStop && selectedTripId) {
-        dimmed = bus.tripId !== selectedTripId;
-      } else if (hasSelectedStop) {
-        dimmed = !isIncoming;
-      } else if (hasSelectedRoute) {
-        dimmed = !isSelectedBus;
-      }
+      const isSelected =
+        hasRoute && bus.normalizedRoute === normalize(selectedRoute);
+      const dimmed =
+        hasStop && selectedTripId
+          ? bus.tripId !== selectedTripId
+          : hasStop
+            ? !isIncoming
+            : hasRoute
+              ? !isSelected
+              : false;
 
       if (visible && inViewport && !dimmed) {
-        if (!clusterGroup.hasLayer(bus.marker)) {
+        if (!clusterGroup.hasLayer(bus.marker))
           clusterGroup.addLayer(bus.marker);
-        }
         visibleMarkers.push(bus.marker);
       } else {
-        if (clusterGroup.hasLayer(bus.marker)) {
+        if (clusterGroup.hasLayer(bus.marker))
           clusterGroup.removeLayer(bus.marker);
-        }
       }
-
-      const direction = getTripDirection(bus.tripId);
       bus.marker.setIcon(
         makeBusIcon(
           bus.bearing,
           false,
-          isSelectedBus,
-          isIncoming && hasSelectedStop && !selectedTripId,
-          direction
+          isSelected && !followingBus,
+          isFollowed || (isIncoming && hasStop && !selectedTripId),
+          getTripDirection(bus.tripId),
+          bus.routeName
         )
       );
     });
 
-    if (shouldAutoFit && visibleMarkers.length > 0) {
-      const group = L.featureGroup(visibleMarkers);
-      map.fitBounds(group.getBounds().pad(0.05));
+    if (shouldAutoFit && visibleMarkers.length) {
+      map.fitBounds(L.featureGroup(visibleMarkers).getBounds().pad(0.05));
       shouldAutoFit = false;
     }
-
     showStopsForTrip(resolveStaticTripId(selectedTripId));
     renderAllStops();
     ensureSelectedStopMarker();
   }
 
+  const shouldShow = (nr) =>
+    (!searchTerm || nr === normalize(searchTerm)) &&
+    (!favouritesMode || favourites.includes(nr));
+
   function createMarker(bus, normalizedRoute) {
-    return L.marker([bus.lat, bus.lng], { icon: makeBusIcon(bus.bearing) })
-      .bindTooltip(bus.routeName, {
-        permanent: true,
-        direction: "top",
-        className: "bus-label",
-      })
-      .on("click", async (e) => {
-        L.DomEvent.stopPropagation(e);
-        clearSelectedStop();
+    // Compute initial bearing from shape so direction is correct at first load
+    const initialBearing = resolveBearing({
+      tripId: bus.tripId,
+      lat: bus.lat,
+      lng: bus.lng,
+    });
+    const bearing = initialBearing || bus.bearing || 0;
+    return L.marker([bus.lat, bus.lng], {
+      icon: makeBusIcon(
+        bearing,
+        false,
+        false,
+        false,
+        getTripDirection(bus.tripId),
+        bus.routeName
+      ),
+    }).on("click", async (e) => {
+      L.DomEvent.stopPropagation(e);
+
+      const alreadySelected = selectedTripId === bus.tripId;
+
+      if (alreadySelected && !followingBus) {
+        // Second click on same bus — enter follow mode, close stop panel
+        followingBus = true;
+        clearSelectedStop(); // closes stop panel, clears stop marker
         selectedRoute = normalizedRoute;
         selectedTripId = bus.tripId;
-
-        const staticTripId = resolveStaticTripId(bus.tripId);
-        if (!tripStopSequence.has(staticTripId)) {
-          try {
-            const stops = await fetchTripSchedule(staticTripId);
-            if (stops) {
-              const ordered = stops
-                .map((s) => ({
-                  stop_id: s.stop_id,
-                  seq: parseInt(s.stop_sequence),
-                }))
-                .sort((a, b) => a.seq - b.seq);
-              tripStopSequence.set(staticTripId, ordered);
-            }
-          } catch (err) {
-            console.warn("Failed to load stops for trip", staticTripId, err);
-          }
-        }
-
-        const current = busData.get(bus.id);
-        if (current) {
-          map.setView([current.lat, current.lng], Math.max(map.getZoom(), 16), {
+        const cur = busData.get(bus.id);
+        if (cur)
+          map.setView([cur.lat, cur.lng], Math.max(map.getZoom(), 16), {
             animate: true,
           });
-        }
-
         applySearch();
-      });
+        return;
+      }
+
+      if (alreadySelected && followingBus) {
+        // Third click (or click while following) — deselect entirely
+        followingBus = false;
+        selectedRoute = "";
+        selectedTripId = "";
+        shapeLayerGroup?.clearLayers();
+        stopLayerGroup?.clearLayers();
+        applySearch();
+        return;
+      }
+
+      // First click — select bus, show route, but don't follow yet
+      followingBus = false;
+      clearSelectedStop();
+      selectedRoute = normalizedRoute;
+      selectedTripId = bus.tripId;
+      const sid = resolveStaticTripId(bus.tripId);
+      if (!tripStopSequence.has(sid)) {
+        const stops = await fetchTripSchedule(sid).catch(() => null);
+        if (stops) {
+          tripStopSequence.set(
+            sid,
+            stops
+              .map((s) => ({ stop_id: s.stop_id, seq: +s.stop_sequence }))
+              .sort((a, b) => a.seq - b.seq)
+          );
+          matchTripsToShapes();
+        }
+      }
+      const cur = busData.get(bus.id);
+      if (cur)
+        map.setView([cur.lat, cur.lng], Math.max(map.getZoom(), 16), {
+          animate: true,
+        });
+      applySearch();
+    });
   }
 
   async function refreshBuses(routeNames, isBackground = false) {
     if (isFetching) return;
     isFetching = true;
-
     try {
       const { buses: newBuses, feedTimestamp } = await fetchBuses(routeNames);
-      const incomingIds = new Set(newBuses.map((b) => b.id));
-
-      if (!isBackground) {
-        clusterGroup.clearLayers();
-      }
-
+      const incoming = new Set(newBuses.map((b) => b.id));
+      if (!isBackground) clusterGroup.clearLayers();
       busData.forEach((entry, id) => {
-        if (!incomingIds.has(id)) {
+        if (!incoming.has(id)) {
           clusterGroup.removeLayer(entry.marker);
           busData.delete(id);
         }
       });
 
-      newBuses.forEach((newBus) => {
-        const normalizedRoute = normalize(newBus.routeName);
-        const bearing = resolveBearing(newBus);
+      for (const newBus of newBuses) {
+        const nr = normalize(newBus.routeName),
+          bearing = resolveBearing(newBus);
+
+        // Filter out buses that are too far from their route shape.
+        // Returns 0 if no shape loaded yet, so buses are never hidden at startup.
+        const distFromRoute = distanceFromShape(
+          newBus.tripId,
+          newBus.lat,
+          newBus.lng
+        );
+        if (distFromRoute > 0.001) {
+          // Remove from map if it was previously shown
+          if (busData.has(newBus.id)) {
+            clusterGroup.removeLayer(busData.get(newBus.id).marker);
+            busData.delete(newBus.id);
+          }
+          continue;
+        }
 
         if (busData.has(newBus.id)) {
-          const entry = busData.get(newBus.id);
-          entry.lat = newBus.lat;
-          entry.lng = newBus.lng;
-          entry.bearing = bearing;
-          entry.tripId = newBus.tripId;
-          entry.normalizedRoute = normalizedRoute;
-          entry.marker.setLatLng([newBus.lat, newBus.lng]);
+          const e = busData.get(newBus.id);
+          Object.assign(e, {
+            lat: newBus.lat,
+            lng: newBus.lng,
+            bearing,
+            tripId: newBus.tripId,
+            normalizedRoute: nr,
+          });
+          e.marker.setLatLng([newBus.lat, newBus.lng]);
+          e.marker.setIcon(
+            makeBusIcon(
+              bearing,
+              false,
+              false,
+              false,
+              getTripDirection(newBus.tripId),
+              newBus.routeName
+            )
+          );
         } else {
-          const marker = createMarker({ ...newBus, bearing }, normalizedRoute);
           busData.set(newBus.id, {
             ...newBus,
             bearing,
-            normalizedRoute,
-            marker,
+            normalizedRoute: nr,
+            marker: createMarker({ ...newBus, bearing }, nr),
           });
         }
-      });
-
-      buses = newBuses;
-
-      if (feedTimestamp && feedTimestamp !== lastUpdated) {
-        lastUpdated = feedTimestamp;
       }
-
+      buses = newBuses;
+      if (feedTimestamp && feedTimestamp !== lastUpdated)
+        lastUpdated = feedTimestamp;
       if (selectedStop) {
         incomingTripIds = getIncomingTripsForStop(selectedStop.stop_id);
         await refreshStopArrivals(selectedStop);
       }
-
-      if (selectedTripId && !stopPanelStop) {
+      if (followingBus && selectedTripId) {
         const followed = [...busData.values()].find(
           (b) => b.tripId === selectedTripId
         );
-        if (followed) {
+        if (followed)
           map.panTo([followed.lat, followed.lng], {
             animate: true,
             duration: 0.8,
           });
-        }
       }
-
       updateTimer();
       applySearch();
-    } catch (err) {
-      console.error("Failed to refresh buses:", err);
     } finally {
       isFetching = false;
     }
   }
 
-  // Fully async — updates live arrivals from bus positions, falls back to scheduled
   async function refreshStopArrivals(stop) {
-    const matchingTrips = [];
-
+    const trips = [];
     tripStopSequence.forEach((stops, staticTripId) => {
       const targetIdx = stops.findIndex((s) => s.stop_id === stop.stop_id);
       if (targetIdx === -1) return;
-
-      // Match live buses by resolving their feed tripId to the static tripId
       let liveBus = null;
       busData.forEach((bus) => {
         if (resolveStaticTripId(bus.tripId) === staticTripId) liveBus = bus;
       });
       if (!liveBus) return;
-
-      let nearestIdx = 0;
-      let nearestDist = Infinity;
-      for (let i = 0; i < stops.length; i++) {
-        const ll = stopLatLng.get(stops[i].stop_id);
-        if (!ll) continue;
-        const dLat = ll.lat - liveBus.lat;
-        const dLng = ll.lng - liveBus.lng;
-        const dist = dLat * dLat + dLng * dLng;
-        if (dist < nearestDist) {
-          nearestDist = dist;
-          nearestIdx = i;
-        }
-      }
-
-      if (nearestIdx >= targetIdx) return;
-
-      const estMinutes = calcEstMinutes(stops, nearestIdx, targetIdx);
-      matchingTrips.push({
-        tripId: liveBus.tripId, // ✅ for clicking / zooming
-        staticTripId: staticTripId, // ✅ for schedule + matching
+      const i = nearestStopIdx(stops, liveBus.lat, liveBus.lng);
+      if (i >= targetIdx) return;
+      trips.push({
+        tripId: liveBus.tripId,
+        staticTripId,
         routeName: liveBus.routeName,
         normalizedRoute: liveBus.normalizedRoute,
-        estMinutes,
+        estMinutes: calcEstMinutes(stops, i, targetIdx),
         type: "live",
       });
     });
 
-    matchingTrips.sort((a, b) => a.estMinutes - b.estMinutes);
+    trips.sort((a, b) => a.estMinutes - b.estMinutes);
+    if (trips.length) {
+      stopPanelArrivals = trips.slice(0, 8);
+      return;
+    }
 
-    if (matchingTrips.length > 0) {
-      stopPanelArrivals = matchingTrips.slice(0, 8);
-    } else {
-      // Refresh scheduled times so they tick down accurately
-      try {
-        const res = await fetch(`${API}/stop-times/${stop.stop_id}`);
-        const times = await res.json();
-        const now = new Date();
-        const nowMins = now.getHours() * 60 + now.getMinutes();
+    try {
+      const times = await fetch(`${API}/stop-times/${stop.stop_id}`).then((r) =>
+        r.json()
+      );
+      const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
+      stopPanelArrivals = times
+        .map((t) => {
+          const [h, m] = t.arrival_time.split(":").map(Number);
+          return { ...t, totalMins: h * 60 + m };
+        })
+        .filter((t) => t.totalMins >= nowMins)
+        .slice(0, 8)
+        .map((t) => ({
+          routeName: t.trip_id,
+          tripId: null,
+          estMinutes: t.totalMins - nowMins,
+          arrivalTime: t.arrival_time,
+          type: "scheduled",
+        }));
+    } catch {}
+  }
 
-        stopPanelArrivals = times
-          .map((t) => {
-            const [h, m] = t.arrival_time.split(":").map(Number);
-            return { ...t, totalMins: h * 60 + m };
-          })
-          .filter((t) => t.totalMins >= nowMins)
-          .slice(0, 8)
-          .map((t) => ({
-            routeName: t.trip_id,
-            tripId: null,
-            estMinutes: t.totalMins - nowMins,
-            arrivalTime: t.arrival_time,
-            type: "scheduled",
-          }));
-      } catch (e) {
-        // Keep existing arrivals if fetch fails
-      }
+  async function openStopPanel(stop) {
+    if (stopPanelStop?.stop_id === stop.stop_id) {
+      clearSelectedStop();
+      applySearch();
+      return;
+    }
+    selectedStop = stop;
+    stopPanelStop = stop;
+    stopPanelArrivals = [];
+    stopPanelLoading = true;
+    selectedTripId = "";
+    selectedRoute = "";
+
+    const lat = +stop.stop_lat,
+      lng = +stop.stop_lon;
+    setTimeout(() => {
+      map.setView([lat, lng], Math.max(map.getZoom(), 16), { animate: true });
+      setTimeout(
+        () => map.panBy([0, 160], { animate: true, duration: 0.3 }),
+        350
+      );
+    }, 50);
+    applySearch();
+
+    try {
+      const unfetched = [...busData.values()]
+        .map((b) => b.tripId)
+        .filter((id) => id && !tripStopSequence.has(id));
+      await Promise.all(
+        unfetched.map(async (liveTripId) => {
+          const sid = resolveStaticTripId(liveTripId);
+          if (tripStopSequence.has(sid)) return;
+          const stops = await fetchTripSchedule(sid).catch(() => null);
+          if (!stops?.length) return;
+          tripStopSequence.set(
+            sid,
+            stops
+              .map((s) => ({
+                stop_id: s.stop_id,
+                seq: +s.stop_sequence,
+                arrival_time: s.arrival_time || s.departure_time || null,
+              }))
+              .sort((a, b) => a.seq - b.seq)
+          );
+        })
+      );
+      incomingTripIds = getIncomingTripsForStop(stop.stop_id);
+      await refreshStopArrivals(stop);
+    } finally {
+      stopPanelLoading = false;
     }
   }
 
-  function locateMe() {
-    if (locationMarker) {
-      map.setView(locationMarker.getLatLng(), 17);
-    }
+  function handleArrivalClick(arrival) {
+    if (arrival.type !== "live" || !arrival.tripId) return;
+    const entry = [...busData.values()].find(
+      (b) => b.tripId === arrival.tripId
+    );
+    if (!entry) return;
+    selectedRoute = entry.normalizedRoute;
+    selectedTripId = arrival.tripId;
+    followingBus = true;
+    // Close the stop panel and zoom straight to the bus
+    clearSelectedStop();
+    map.setView([entry.lat, entry.lng], Math.max(map.getZoom(), 16), {
+      animate: true,
+    });
+    applySearch();
   }
 
-  // FIX: delegate marker creation entirely to openStopPanel/ensureSelectedStopMarker
-  // rather than duplicating it here, to avoid double-add / stale-node errors
+  export function zoomToBus(tripId) {
+    const entry = [...busData.values()].find((b) => b.tripId === tripId);
+    if (!entry) return;
+    selectedRoute = entry.normalizedRoute;
+    selectedTripId = tripId;
+    if (selectedStop)
+      fitBoundsWithPanel(
+        L.latLngBounds(
+          [entry.lat, entry.lng],
+          [+selectedStop.stop_lat, +selectedStop.stop_lon]
+        )
+      );
+    else map.setView([entry.lat, entry.lng], 16);
+    applySearch();
+  }
+
   export function jumpToStop(stop) {
-    const lat = parseFloat(stop.stop_lat);
-    const lng = parseFloat(stop.stop_lon);
-    map.setView([lat, lng], Math.max(map.getZoom(), 16));
+    map.setView([+stop.stop_lat, +stop.stop_lon], Math.max(map.getZoom(), 16));
     openStopPanel(stop);
   }
 
-  let routeNamesGlobal = {};
+  function locateMe() {
+    if (locationMarker) map.setView(locationMarker.getLatLng(), 17);
+  }
 
   function refreshPage() {
     const now = Date.now();
-    if (now - lastManualRefresh < 10000) return; // 10s cooldown
+    if (now - lastManualRefresh < 10000) return;
     lastManualRefresh = now;
     refreshBuses(routeNamesGlobal, false);
   }
 
-  // Dynamic polling with backoff
   function scheduleNextRefresh(routeNames) {
     setTimeout(async () => {
       await refreshBuses(routeNames, true);
@@ -1177,17 +1097,13 @@
       ],
       maxBoundsViscosity: 1.0,
     });
-
     map.fitBounds([
       [53.14, -6.63],
       [53.46, -6.0],
     ]);
     setTimeout(() => map.invalidateSize(), 0);
 
-    // Update the "Xs ago" pill every second
-    timerInterval = setInterval(updateTimer, 1000);
-
-    // Tick live arrival countdowns every second — no API call needed
+    setInterval(updateTimer, 1000);
     setInterval(() => {
       if (!stopPanelStop || stopPanelLoading) return;
       stopPanelArrivals = stopPanelArrivals.map((a) => ({
@@ -1195,8 +1111,6 @@
         estMinutes: Math.max(0, a.estMinutes - 1 / 60),
       }));
     }, 1000);
-
-    // Re-compute arrivals from current bus positions every 10s
     setInterval(async () => {
       if (stopPanelStop && !stopPanelLoading) {
         incomingTripIds = getIncomingTripsForStop(stopPanelStop.stop_id);
@@ -1210,44 +1124,42 @@
       maxClusterRadius: 40,
       spiderfyOnMaxZoom: false,
       showCoverageOnHover: false,
-      iconCreateFunction(cluster) {
-        const count = cluster.getChildCount();
-        return L.divIcon({
-          html: `<div class="cluster-icon">${count}</div>`,
+      iconCreateFunction: (c) =>
+        L.divIcon({
+          html: `<div class="cluster-icon">${c.getChildCount()}</div>`,
           className: "",
           iconSize: [36, 36],
           iconAnchor: [18, 18],
-        });
-      },
+        }),
     });
-
     map.addLayer(clusterGroup);
-
     map.on("moveend zoomend", () => applySearch());
-
     map.on("click", () => {
       if (stopPanelStop && selectedTripId) {
         selectedRoute = "";
         selectedTripId = "";
-        if (shapeLayerGroup) shapeLayerGroup.clearLayers();
-        if (stopLayerGroup) stopLayerGroup.clearLayers();
+        followingBus = false;
+        shapeLayerGroup?.clearLayers();
+        stopLayerGroup?.clearLayers();
         applySearch();
-        const stopLat = parseFloat(stopPanelStop.stop_lat);
-        const stopLng = parseFloat(stopPanelStop.stop_lon);
+        const lat = +stopPanelStop.stop_lat,
+          lng = +stopPanelStop.stop_lon;
         setTimeout(() => {
-          const PANEL_PX = 320;
-          const zoom = Math.max(map.getZoom(), 16);
-          map.setView([stopLat, stopLng], zoom, { animate: true });
-          setTimeout(() => {
-            map.panBy([0, PANEL_PX / 2], { animate: true, duration: 0.3 });
-          }, 350);
+          map.setView([lat, lng], Math.max(map.getZoom(), 16), {
+            animate: true,
+          });
+          setTimeout(
+            () => map.panBy([0, 160], { animate: true, duration: 0.3 }),
+            350
+          );
         }, 50);
       } else {
         selectedRoute = "";
         selectedTripId = "";
+        followingBus = false;
         clearSelectedStop();
-        if (shapeLayerGroup) shapeLayerGroup.clearLayers();
-        if (stopLayerGroup) stopLayerGroup.clearLayers();
+        shapeLayerGroup?.clearLayers();
+        stopLayerGroup?.clearLayers();
         applySearch();
       }
     });
@@ -1262,95 +1174,30 @@
       }
     ).addTo(map);
 
-    const protoUrl = import.meta.env.BASE_URL + "gtfs-realtime.proto";
-
     const [root, routeNames] = await Promise.all([
-      protobuf.load(protoUrl),
+      protobuf.load(import.meta.env.BASE_URL + "gtfs-realtime.proto"),
       fetchRouteNames(),
     ]);
-
     routeNamesGlobal = routeNames;
     FeedMessage = root.lookupType("transit_realtime.FeedMessage");
 
-    // ── DIAGNOSTICS ──────────────────────────────────────────────
-    try {
-      const rawRoutes = await fetch(`${API}/routes`).then((r) => r.json());
-      const routesArr = Array.isArray(rawRoutes)
-        ? rawRoutes
-        : Object.values(rawRoutes);
-      console.log("[diag] routes[0]:", routesArr[0]);
-      console.log("[diag] routes count:", routesArr.length);
-    } catch (e) {
-      console.warn("[diag] routes failed:", e);
-    }
-
-    try {
-      const rawTrips = await fetch(`${API}/trips`).then((r) => r.json());
-      const tripsArr = Array.isArray(rawTrips)
-        ? rawTrips
-        : Object.entries(rawTrips.trips ?? rawTrips).map(([trip_id, t]) => ({
-            trip_id,
-            ...t,
-          }));
-      console.log("[diag] trips[0]:", tripsArr[0]);
-      console.log("[diag] trips count:", tripsArr.length);
-    } catch (e) {
-      console.warn("[diag] trips failed:", e);
-    }
-
-    try {
-      const vehRes = await fetch(`${API}/vehicles`);
-      console.log("[diag] vehicles status:", vehRes.status);
-      if (vehRes.ok) {
-        const buf = await vehRes.arrayBuffer();
-        const feed = FeedMessage.decode(new Uint8Array(buf));
-        const sample = feed.entity?.[0]?.vehicle;
-        console.log("[diag] feed entity[0] tripId:", sample?.trip?.tripId);
-        console.log("[diag] feed entity[0] routeId:", sample?.trip?.routeId);
-        console.log("[diag] feed total entities:", feed.entity?.length);
-      }
-    } catch (e) {
-      console.warn("[diag] vehicles failed:", e);
-    }
-
-    console.log(
-      "[diag] routeNames sample keys:",
-      Object.keys(routeNames).slice(0, 5)
-    );
-    console.log(
-      "[diag] tripRouteNameMap size before build:",
-      tripRouteNameMap.size
-    );
-    // ─────────────────────────────────────────────────────────────
-
-    // Build tripId→routeName map BEFORE fetching buses so labels are correct from the start
     await fetchTripRouteNames(routeNames);
-
-    console.log(
-      "[diag] tripRouteNameMap size after build:",
-      tripRouteNameMap.size
-    );
-    console.log(
-      "[diag] tripRouteNameMap sample:",
-      [...tripRouteNameMap.entries()].slice(0, 3)
-    );
-
+    await fetchShapes();
     await refreshBuses(routeNames, false);
-
-    Promise.all([fetchStops(), fetchShapes()]).then(() => {
-      fetchRouteStops(routeNames).then(() => applySearch());
-    });
-
-    // Start dynamic polling with backoff
+    fetchStops().then(() =>
+      fetchRouteStops(routeNames).then(() => {
+        matchTripsToShapes();
+        refilterBusesAfterShapeMatch();
+        applySearch();
+      })
+    );
     scheduleNextRefresh(routeNames);
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(
-        (pos) => {
-          const { latitude, longitude } = pos.coords;
-          if (locationMarker) {
-            locationMarker.setLatLng([latitude, longitude]);
-          } else {
+        ({ coords: { latitude, longitude } }) => {
+          if (locationMarker) locationMarker.setLatLng([latitude, longitude]);
+          else {
             locationMarker = L.circleMarker([latitude, longitude], {
               radius: 10,
               fillColor: "#4285F4",
@@ -1401,38 +1248,29 @@
 {#if stopPanelStop}
   <div class="stop-panel">
     <div class="stop-panel-header">
-      <div class="stop-panel-title">
-        <span class="stop-panel-name">{stopPanelStop.stop_name}</span>
-        <span class="stop-panel-code">Stop {stopPanelStop.stop_code}</span>
+      <div class="stop-panel-header-left">
+        <div class="stop-panel-code">Stop {stopPanelStop.stop_code}</div>
+        <div class="stop-panel-name">{stopPanelStop.stop_name}</div>
       </div>
       <div class="stop-panel-actions">
         <button
           class="save-stop-btn"
           class:saved={isStopSaved(stopPanelStop.stop_id)}
           on:click|stopPropagation={() => toggleSaveStop(stopPanelStop)}
+          title={isStopSaved(stopPanelStop.stop_id) ? "Saved" : "Save stop"}
         >
-          {#if isStopSaved(stopPanelStop.stop_id)}
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
-              />
-            </svg>
-            Saved
-          {:else}
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path
-                d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
-              ></path>
-            </svg>
-            Save stop
-          {/if}
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill={isStopSaved(stopPanelStop.stop_id) ? "currentColor" : "none"}
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
+            />
+          </svg>
         </button>
         <button
           class="stop-panel-close"
@@ -1443,45 +1281,46 @@
         >
       </div>
     </div>
-
-    <div class="stop-panel-body">
+    <div class="stop-panel-board">
       {#if stopPanelLoading}
-        <div class="stop-panel-empty">Loading arrivals...</div>
-      {:else if stopPanelArrivals.length === 0}
-        <div class="stop-panel-empty">No upcoming arrivals</div>
+        <div class="board-empty">Loading arrivals…</div>
+      {:else if !stopPanelArrivals.length}
+        <div class="board-empty">No upcoming arrivals</div>
       {:else}
         {#each stopPanelArrivals as arrival}
           <button
-            class="stop-panel-row"
+            class="board-row"
             class:clickable={arrival.type === "live" && arrival.tripId}
             on:click={() => handleArrivalClick(arrival)}
           >
-            <span class="stop-panel-time">
+            <span class="board-num">{arrival.routeName}</span>
+            <span class="board-dest">
+              {arrival.type === "live"
+                ? "Live tracking"
+                : (arrival.arrivalTime?.slice(0, 5) ?? "—")}
+            </span>
+            <span
+              class="board-time"
+              class:board-due={arrival.type === "live" &&
+                arrival.estMinutes <= 1}
+            >
               {arrival.type === "live"
                 ? arrival.estMinutes <= 1
                   ? "Due"
-                  : `${Math.floor(arrival.estMinutes)} min`
+                  : `${Math.floor(arrival.estMinutes)}min`
                 : (arrival.arrivalTime?.slice(0, 5) ?? "—")}
-            </span>
-            <span class="stop-panel-route">{arrival.routeName}</span>
-            <span
-              class="stop-panel-badge"
-              class:live={arrival.type === "live"}
-              class:scheduled={arrival.type === "scheduled"}
-            >
-              {arrival.type === "live" ? "Live" : "Scheduled"}
             </span>
             {#if arrival.type === "live" && arrival.tripId}
               <svg
-                width="14"
-                height="14"
+                width="12"
+                height="12"
                 viewBox="0 0 24 24"
                 fill="none"
-                stroke="#aaa"
-                stroke-width="2"
+                stroke="#e8a020"
+                stroke-width="2.5"
                 style="flex-shrink:0"
               >
-                <polyline points="9 18 15 12 9 6"></polyline>
+                <polyline points="9 18 15 12 9 6" />
               </svg>
             {/if}
           </button>
@@ -1501,10 +1340,18 @@
     stroke-width="2"
   >
     <circle cx="12" cy="12" r="8"></circle>
-    <line x1="12" x2="12" y1="2" y2="6"></line>
-    <line x1="12" x2="12" y1="18" y2="22"></line>
-    <line x1="2" y1="12" x2="6" y2="12"></line>
-    <line x1="18" y1="12" x2="22" y2="12"></line>
+    <line x1="12" x2="12" y1="2" y2="6"></line><line
+      x1="12"
+      x2="12"
+      y1="18"
+      y2="22"
+    ></line>
+    <line x1="2" y1="12" x2="6" y2="12"></line><line
+      x1="18"
+      y1="12"
+      x2="22"
+      y2="12"
+    ></line>
   </svg>
 </button>
 
@@ -1517,8 +1364,9 @@
     stroke="currentColor"
     stroke-width="2"
   >
-    <polyline points="23 4 23 10 17 10"></polyline>
-    <polyline points="1 20 1 14 7 14"></polyline>
+    <polyline points="23 4 23 10 17 10"></polyline><polyline
+      points="1 20 1 14 7 14"
+    ></polyline>
     <path
       d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
     ></path>
@@ -1539,110 +1387,94 @@
     overflow: hidden;
     touch-action: pan-x pan-y;
   }
-
   .map {
     width: 100%;
     height: 100%;
   }
 
+  /* ── Stop panel – LED board style ── */
   .stop-panel {
     position: fixed;
     bottom: 100px;
     left: 0;
     right: 0;
     z-index: 1100;
-    background: white;
-    border-top: 1px solid #e0e0e0;
-    border-radius: 16px 16px 0 0;
-    box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.15);
-    max-height: 260px;
+    background: #0e0e0e;
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
+    max-height: 300px;
     display: flex;
     flex-direction: column;
+    font-family: "Courier New", Courier, monospace;
   }
-
   .stop-panel-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 16px 8px;
-    border-bottom: 1px solid #f0f0f0;
+    padding: 10px 14px 8px;
+    border-bottom: 1px solid #2a2a2a;
     flex-shrink: 0;
   }
-
-  .stop-panel-title {
+  .stop-panel-header-left {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
   }
-
-  .stop-panel-name {
-    font-weight: 700;
-    font-size: 14px;
-    color: #111;
-  }
-
   .stop-panel-code {
-    font-size: 11px;
-    color: #888;
+    font-size: 10px;
+    color: #666;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
   }
-
+  .stop-panel-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e8a020;
+    letter-spacing: 0.03em;
+  }
   .stop-panel-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
   }
-
   .save-stop-btn {
+    background: none;
+    border: none;
+    color: #555;
+    cursor: pointer;
+    padding: 4px;
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 4px 10px;
-    border-radius: 20px;
-    border: 1.5px solid #1a73e8;
-    background: transparent;
-    color: #1a73e8;
-    cursor: pointer;
-    transition:
-      background 0.15s,
-      color 0.15s;
+    transition: color 0.15s;
   }
-
   .save-stop-btn.saved {
-    background: #1a73e8;
-    color: white;
+    color: #e8a020;
   }
-
   .stop-panel-close {
     background: none;
     border: none;
     font-size: 16px;
-    color: #888;
+    color: #555;
     cursor: pointer;
-    padding: 4px;
-    line-height: 1;
+    padding: 4px 6px;
   }
-
-  .stop-panel-body {
+  .stop-panel-board {
     overflow-y: auto;
     flex: 1;
-    padding: 4px 0 8px;
+    padding: 2px 0 6px;
   }
-
-  .stop-panel-empty {
-    font-size: 13px;
-    color: #999;
-    padding: 12px 16px;
+  .board-empty {
+    font-size: 12px;
+    color: #555;
+    padding: 12px 14px;
+    font-family: "Courier New", Courier, monospace;
   }
-
-  .stop-panel-row {
+  .board-row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 16px;
-    border-bottom: 1px solid #f8f8f8;
-    font-size: 13px;
+    gap: 0;
+    padding: 7px 14px;
+    border-bottom: 1px solid #1a1a1a;
     width: 100%;
     background: none;
     border-left: none;
@@ -1650,45 +1482,79 @@
     border-top: none;
     text-align: left;
     cursor: default;
+    transition: background 0.1s;
   }
-
-  .stop-panel-row.clickable {
+  .board-row.clickable {
     cursor: pointer;
   }
-
-  .stop-panel-row.clickable:hover {
-    background: #f5f8ff;
+  .board-row.clickable:hover {
+    background: #1a1a1a;
   }
-
-  .stop-panel-time {
+  .board-num {
+    font-size: 16px;
     font-weight: 700;
-    color: #1a73e8;
+    color: #e8a020;
     min-width: 48px;
+    letter-spacing: 0.02em;
+    font-family: "Courier New", Courier, monospace;
   }
-
-  .stop-panel-route {
+  .board-dest {
     flex: 1;
-    color: #333;
+    font-size: 13px;
+    color: #d09010;
+    letter-spacing: 0.04em;
+    font-family: "Courier New", Courier, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-
-  .stop-panel-badge {
-    font-size: 10px;
+  .board-time {
+    font-size: 14px;
     font-weight: 700;
-    padding: 2px 7px;
-    border-radius: 10px;
-    text-transform: uppercase;
+    color: #e8a020;
+    min-width: 44px;
+    text-align: right;
+    letter-spacing: 0.02em;
+    font-family: "Courier New", Courier, monospace;
+    margin-right: 4px;
+  }
+  .board-time.board-due {
+    color: #ff6b35;
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.3;
+    }
   }
 
-  .stop-panel-badge.live {
-    background: #e8f5e9;
-    color: #2e7d32;
+  /* ── Bus marker ── */
+  :global(.bus-marker-outer) {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    width: 44px;
   }
-
-  .stop-panel-badge.scheduled {
-    background: #e3f2fd;
-    color: #1565c0;
+  :global(.bus-route-label) {
+    background: #1a73e8;
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 4px;
+    white-space: nowrap;
+    line-height: 1.4;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    max-width: 44px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
   }
-
   :global(.bus-marker-wrap) {
     width: 40px;
     height: 40px;
@@ -1696,23 +1562,14 @@
     align-items: center;
     justify-content: center;
   }
-
   :global(.bus-img) {
     width: 40px;
     height: 40px;
     object-fit: contain;
   }
-
   :global(.leaflet-tooltip.bus-label) {
-    background: #1a73e8 !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 4px;
-    font-weight: bold;
-    font-size: 11px;
-    padding: 2px 5px;
+    display: none;
   }
-
   :global(.cluster-icon) {
     width: 36px;
     height: 36px;
@@ -1727,7 +1584,6 @@
     border: 2px solid white;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   }
-
   :global(.stop-marker) {
     width: 12px;
     height: 12px;
@@ -1736,7 +1592,6 @@
     border-radius: 50%;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   }
-
   :global(.stop-marker-highlighted) {
     width: 18px;
     height: 18px;
@@ -1764,18 +1619,11 @@
     cursor: pointer;
     padding: 0;
   }
-
   .locate-btn {
     top: 70px;
   }
-
   .refresh-btn {
     top: 130px;
-  }
-
-  .locate-btn svg,
-  .refresh-btn svg {
-    display: block;
   }
 
   .update-pill {
@@ -1793,8 +1641,6 @@
     white-space: nowrap;
     transition: bottom 0.2s ease;
   }
-
-  /* Sit above the stop panel (100px footer + 260px panel + 10px gap) */
   .update-pill.above-panel {
     bottom: 375px;
   }
@@ -1811,13 +1657,11 @@
     backdrop-filter: blur(4px);
     gap: 10px;
   }
-
   .spinner {
     width: 48px;
     height: 48px;
     animation: spin 1s linear infinite;
   }
-
   @keyframes spin {
     from {
       transform: rotate(0deg);
