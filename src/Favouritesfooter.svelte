@@ -274,15 +274,15 @@
     left: 0;
     right: 0;
     height: 100px;
-    background: white;
-    border-top: 1px solid #e0e0e0;
+    background: #0e0e0e;
+    border-top: 1px solid #2a2a2a;
     z-index: 1000;
     display: flex;
     align-items: center;
     padding: 0 12px;
     padding-bottom: env(safe-area-inset-bottom);
     gap: 8px;
-    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.7);
   }
 
   .fav-open-btn {
@@ -290,19 +290,25 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    background: #f5f5f5;
-    border: none;
-    border-radius: 10px;
+    background: #0e0e0e;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
     padding: 20px 14px;
     cursor: pointer;
-    font-size: 14px;
-    font-weight: 500;
-    color: #222;
-    transition: background 0.15s;
+    font-size: 13px;
+    font-weight: 700;
+    color: #e8a020;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    transition:
+      background 0.15s,
+      border-color 0.15s;
   }
 
   .fav-open-btn:hover {
-    background: #ebebeb;
+    background: #1a1a1a;
+    border-color: #e8a020;
   }
 
   .label {
@@ -311,22 +317,24 @@
   }
 
   .badge {
-    background: #1a73e8;
-    color: white;
+    background: #e8a020;
+    color: #0e0e0e;
     font-size: 11px;
     font-weight: 700;
     border-radius: 10px;
     padding: 2px 7px;
     min-width: 20px;
     text-align: center;
+    font-family: "Courier New", Courier, monospace;
   }
 
   .mode-btn {
     width: 40px;
     height: 40px;
-    border-radius: 10px;
-    border: 1px solid #ddd;
-    background: white;
+    border-radius: 8px;
+    border: 1px solid #2a2a2a;
+    background: #0e0e0e;
+    color: #e8a020;
     font-size: 20px;
     cursor: pointer;
     display: flex;
@@ -339,25 +347,27 @@
   }
 
   .mode-btn.active {
-    background: #fff8e1;
-    border-color: #f9a825;
+    background: #2a2000;
+    border-color: #e8a020;
   }
 
+  /* ── Full-screen page ── */
   .fav-page {
     position: fixed;
     inset: 0;
-    background: #f8f8f8;
+    background: #0e0e0e;
     z-index: 2000;
     display: flex;
     flex-direction: column;
+    font-family: "Courier New", Courier, monospace;
   }
 
   .fav-page-header {
     display: flex;
     align-items: center;
     padding: 16px;
-    background: white;
-    border-bottom: 1px solid #e0e0e0;
+    background: #0e0e0e;
+    border-bottom: 1px solid #2a2a2a;
     gap: 12px;
   }
 
@@ -369,78 +379,95 @@
   }
 
   .tab-btn {
-    background: #f0f0f0;
-    border: none;
-    border-radius: 8px;
+    background: #0e0e0e;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
     padding: 6px 18px;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 700;
     color: #555;
     cursor: pointer;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     transition:
       background 0.15s,
-      color 0.15s;
+      color 0.15s,
+      border-color 0.15s;
   }
 
   .tab-btn.active {
-    background: #1a73e8;
-    color: white;
+    background: #2a2000;
+    color: #e8a020;
+    border-color: #e8a020;
   }
 
   .back-btn {
     background: none;
     border: none;
-    font-size: 15px;
-    color: #1a73e8;
+    font-size: 14px;
+    color: #e8a020;
     cursor: pointer;
     padding: 4px 0;
     min-width: 60px;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.04em;
   }
 
   .edit-btn {
     background: none;
     border: none;
-    font-size: 15px;
-    color: #1a73e8;
+    font-size: 14px;
+    color: #e8a020;
     cursor: pointer;
     padding: 4px 0;
     min-width: 60px;
     text-align: right;
-    font-weight: 500;
+    font-weight: 700;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.04em;
   }
 
   .edit-btn.active {
-    color: #e53935;
+    color: #aa3a3a;
   }
 
+  /* ── Search ── */
   .search-wrap {
     padding: 12px 16px;
-    background: white;
-    border-bottom: 1px solid #e0e0e0;
+    background: #0e0e0e;
+    border-bottom: 1px solid #2a2a2a;
     position: relative;
   }
 
   .search-input {
     width: 100%;
     padding: 10px 14px;
-    border: 1px solid #ddd;
-    border-radius: 10px;
-    font-size: 15px;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    font-size: 14px;
     outline: none;
     box-sizing: border-box;
-    background: #f5f5f5;
+    background: #0e0e0e;
+    color: #e8a020;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.04em;
+    transition: border-color 0.15s;
+  }
+
+  .search-input::placeholder {
+    color: #555;
   }
 
   .search-input:focus {
-    border-color: #1a73e8;
-    background: white;
+    border-color: #e8a020;
   }
 
   .search-results {
     margin-top: 6px;
-    background: white;
-    border: 1px solid #e0e0e0;
-    border-radius: 10px;
+    background: #0e0e0e;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
     overflow: hidden;
   }
 
@@ -451,42 +478,53 @@
     justify-content: space-between;
     padding: 12px 16px;
     border: none;
-    background: white;
+    background: #0e0e0e;
     cursor: pointer;
-    font-size: 15px;
-    border-bottom: 1px solid #f0f0f0;
+    font-size: 14px;
+    color: #e8a020;
+    border-bottom: 1px solid #161616;
     transition: background 0.1s;
     text-align: left;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.04em;
   }
 
   .search-result-item:last-child {
     border-bottom: none;
   }
+
   .search-result-item:hover {
-    background: #f5f5f5;
+    background: #1a1a1a;
   }
+
   .search-result-item.already {
-    color: #888;
+    color: #555;
   }
 
   .add-icon {
     font-size: 18px;
-    color: #1a73e8;
+    color: #e8a020;
     font-weight: 700;
   }
+
   .search-result-item.already .add-icon {
-    color: #4caf50;
+    color: #2a7a2a;
   }
 
   .stop-result-name {
-    font-weight: 500;
+    font-weight: 700;
     display: block;
-  }
-  .stop-result-code {
-    font-size: 12px;
-    color: #888;
+    color: #e8a020;
   }
 
+  .stop-result-code {
+    font-size: 11px;
+    color: #555;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.05em;
+  }
+
+  /* ── Lists ── */
   .fav-list {
     flex: 1;
     overflow-y: auto;
@@ -497,40 +535,54 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background: white;
-    border-radius: 10px;
+    background: #0e0e0e;
+    border-radius: 8px;
     padding: 14px 16px;
     margin-bottom: 8px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    border: 1px solid #2a2a2a;
+    transition: border-color 0.15s;
+  }
+
+  .fav-row:hover {
+    border-color: #3a3000;
   }
 
   .fav-route-pill {
     font-size: 16px;
-    font-weight: 600;
-    color: #222;
+    font-weight: 700;
+    color: #e8a020;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.04em;
   }
+
   .stop-code-label {
-    font-size: 12px;
-    color: #888;
+    font-size: 11px;
+    color: #555;
     margin-top: 2px;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.05em;
   }
 
   .remove-btn {
-    background: #ffebee;
-    color: #e53935;
-    border: none;
+    background: #2a0a0a;
+    color: #aa3a3a;
+    border: 1px solid #4a1a1a;
     border-radius: 6px;
     padding: 6px 12px;
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 12px;
+    font-weight: 700;
     cursor: pointer;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
     transition: background 0.15s;
   }
 
   .remove-btn:hover {
-    background: #ffcdd2;
+    background: #3a1010;
   }
 
+  /* ── Empty state ── */
   .empty {
     display: flex;
     flex-direction: column;
@@ -538,16 +590,22 @@
     justify-content: center;
     gap: 8px;
     padding: 60px 20px;
-    color: #999;
-    font-size: 15px;
+    color: #555;
+    font-size: 13px;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.05em;
   }
 
   .empty-icon {
     font-size: 48px;
     margin-bottom: 8px;
+    opacity: 0.4;
   }
+
   .empty-sub {
-    font-size: 13px;
-    color: #bbb;
+    font-size: 12px;
+    color: #333;
+    text-align: center;
+    letter-spacing: 0.04em;
   }
 </style>

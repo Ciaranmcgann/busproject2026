@@ -121,41 +121,38 @@
     width: 100%;
     padding: 12px 14px;
     border-radius: 10px;
-    border: 1px solid #ddd;
+    border: 1px solid #2a2a2a;
     font-size: 16px;
     outline: none;
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
-    font-family:
-      system-ui,
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      Roboto,
-      Arial,
-      sans-serif;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
+    background: #0e0e0e;
+    color: #e8a020;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.04em;
+    box-sizing: border-box;
+  }
+
+  input::placeholder {
+    color: #555;
+    letter-spacing: 0.06em;
   }
 
   input:focus {
-    border-color: #1a73e8;
+    border-color: #e8a020;
+    background: #0e0e0e;
   }
 
   .dropdown {
-    margin-top: 8px;
-    background: white;
+    margin-top: 6px;
+    background: #0e0e0e;
+    border: 1px solid #2a2a2a;
     border-radius: 10px;
-    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
     max-height: 240px;
     overflow-y: auto;
-    padding: 6px 0;
+    padding: 4px 0;
     list-style: none;
-    font-family:
-      system-ui,
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      Roboto,
-      Arial,
-      sans-serif;
+    font-family: "Courier New", Courier, monospace;
     animation: fadeIn 0.15s ease;
   }
 
@@ -163,16 +160,23 @@
     padding: 10px 14px;
     cursor: pointer;
     font-size: 14px;
-    color: #333;
+    color: #e8a020;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid #161616;
     transition:
-      background 0.15s ease,
-      color 0.15s ease;
+      background 0.1s ease,
+      color 0.1s ease;
+  }
+
+  .dropdown li:last-child {
+    border-bottom: none;
   }
 
   .dropdown li:hover,
   .dropdown li.selected {
-    background: #1a73e8;
-    color: white;
+    background: #1a1a1a;
+    color: #e8a020;
+    border-left: 2px solid #e8a020;
   }
 
   @keyframes fadeIn {
