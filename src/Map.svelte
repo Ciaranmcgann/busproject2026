@@ -48,6 +48,9 @@
   let busPanelStops = [];
   let busPanelLoading = false;
 
+  // The stop the user originally clicked from, to highlight in bus stop panel
+  let originStopId = null;
+
   const STOPS_MIN_ZOOM = 14;
   const API = "https://bus-times.ciaranjmcgann.workers.dev";
   const DUBLIN_BOUNDS = {
@@ -56,6 +59,9 @@
     minLng: -6.63,
     maxLng: -6.0,
   };
+
+  const COLOR_NORTH = "#e8a020";
+  const COLOR_SOUTH = "#1a6bbf";
 
   const isInDublin = (lat, lng) =>
     lat >= DUBLIN_BOUNDS.minLat &&
@@ -172,7 +178,7 @@
     const staticId = resolveStaticTripId(tripId);
     const shapeId = tripShapeMap.get(staticId) || tripShapeMap.get(tripId);
     const pts = shapeId ? shapePoints.get(shapeId) : null;
-    if (!pts || pts.length < 2) return 0;
+    if (!pts || pts.length < 2) return null;
     let bestDist = Infinity;
     for (let i = 0; i < pts.length - 1; i++) {
       const d = (pts[i].lat - lat) ** 2 + (pts[i].lng - lng) ** 2;
@@ -192,8 +198,12 @@
     return last.lat > first.lat ? "northbound" : "southbound";
   }
 
-  // FIXED: use <= so buses AT the stop index are still shown as incoming
-  // Also now scans all busData entries, not just ones already matched
+  function getDirectionColor(tripId) {
+    return getTripDirection(tripId) === "northbound"
+      ? COLOR_NORTH
+      : COLOR_SOUTH;
+  }
+
   function getIncomingTripsForStop(stopId) {
     const result = new Set();
     tripStopSequence.forEach((stops, staticTripId) => {
@@ -214,6 +224,7 @@
     stopPanelArrivals = [];
     incomingTripIds = new Set();
     followingBus = false;
+    originStopId = null;
     if (selectedStopMarker) {
       if (map.hasLayer(selectedStopMarker)) map.removeLayer(selectedStopMarker);
       selectedStopMarker = null;
@@ -316,6 +327,7 @@
       const scheduledMins = timeToMins(s.arrival_time);
       const isPassed = idx < nearestIdx;
       const isCurrent = idx === nearestIdx;
+      const isOrigin = s.stop_id === originStopId;
 
       let status = "future";
       let displayTime = s.arrival_time?.slice(0, 5) ?? "—";
@@ -344,6 +356,7 @@
         status,
         isPassed,
         isCurrent,
+        isOrigin,
       };
     });
 
@@ -508,64 +521,6 @@
     if (selectedTripId) applySearch();
   }
 
-  async function fetchRouteStops(routeNames) {
-    try {
-      const tripsArr = indexTrips(
-        await fetch(`${API}/trips`).then((r) => r.json()),
-        routeNames
-      );
-      const tripToRoute = new Map();
-      for (const trip of tripsArr) {
-        const name = routeNames[trip.route_id?.trim()];
-        if (name) tripToRoute.set(trip.trip_id, normalize(name));
-      }
-      routeStopIds = new Map();
-      const liveTripIds = buses.map((b) => b.tripId).filter(Boolean);
-      const active = [
-        ...new Set(liveTripIds.length ? liveTripIds : [...tripToRoute.keys()]),
-      ];
-      for (let i = 0; i < active.length; i += 10) {
-        await Promise.all(
-          active.slice(i, i + 10).map(async (tripId) => {
-            const sid = resolveStaticTripId(tripId);
-            if (tripStopSequence.has(sid)) return;
-            const stops = await fetchTripSchedule(sid).catch(() => null);
-            if (!stops?.length) return;
-            const nr = tripToRoute.get(tripId) || tripToRoute.get(sid);
-            if (nr) {
-              if (!routeStopIds.has(nr)) routeStopIds.set(nr, new Set());
-              for (const s of stops) routeStopIds.get(nr).add(s.stop_id);
-            }
-            const ordered = stops
-              .map((s) => ({
-                stop_id: s.stop_id,
-                seq: +s.stop_sequence,
-                arrival_time: s.arrival_time || s.departure_time || null,
-              }))
-              .sort((a, b) => a.seq - b.seq);
-            tripStopSequence.set(sid, ordered);
-          })
-        );
-      }
-    } catch {
-      console.warn("Could not load route stops");
-    }
-  }
-
-  function refilterBusesAfterShapeMatch() {
-    if (!busData.size) return;
-    let removed = 0;
-    busData.forEach((entry, id) => {
-      const dist = distanceFromShape(entry.tripId, entry.lat, entry.lng);
-      if (dist > 0.001) {
-        clusterGroup.removeLayer(entry.marker);
-        busData.delete(id);
-        removed++;
-      }
-    });
-    if (removed > 0) applySearch();
-  }
-
   function refreshAllBearings() {
     busData.forEach((entry) => {
       const bearing = resolveBearing({
@@ -629,7 +584,6 @@
   function renderAllStops() {
     allStopsLayerGroup ||= L.layerGroup().addTo(map);
     allStopsLayerGroup.clearLayers();
-    // FIXED: always show stops when zoom is sufficient — don't hide when stop panel is open
     if (!showStops || map.getZoom() < STOPS_MIN_ZOOM) return;
     const src = favouritesMode
       ? allStops.filter((s) =>
@@ -641,7 +595,6 @@
       const lat = +stop.stop_lat,
         lng = +stop.stop_lon;
       if (!bounds.contains([lat, lng])) continue;
-      // Skip the selected stop — it has its own highlighted marker
       if (stopPanelStop && stop.stop_id === stopPanelStop.stop_id) continue;
       const m = L.marker([lat, lng], { icon: makeStopIcon() });
       m.on("click", (e) => {
@@ -664,7 +617,7 @@
       tripStopSequence.get(tripId) || tripStopSequence.get(rawTripId);
     if (!stopsForTrip?.length) return;
 
-    const lineColor = "#e8a020";
+    const lineColor = getDirectionColor(tripId);
     const bounds = map.getBounds().pad(0.1);
 
     const ordered = stopsForTrip
@@ -688,11 +641,11 @@
       const polyPts = useShape
         ? shape.map((p) => [p.lat, p.lng])
         : ordered.map((s) => [s.lat, s.lng]);
+
       L.polyline(polyPts, {
         color: lineColor,
-        weight: 3,
-        opacity: 0.6,
-        dashArray: "6 4",
+        weight: 4,
+        opacity: 0.75,
         lineJoin: "round",
         lineCap: "round",
       }).addTo(shapeLayerGroup);
@@ -700,22 +653,26 @@
       const arrowSrc = useShape
         ? shape
         : ordered.map((s) => ({ lat: s.lat, lng: s.lng }));
-      const step = useShape
-        ? Math.max(1, Math.floor(arrowSrc.length / Math.min(ordered.length, 8)))
-        : 1;
-      for (let i = 0; i < arrowSrc.length - 1; i += step) {
-        const a = arrowSrc[i],
-          b = arrowSrc[Math.min(i + step, arrowSrc.length - 1)];
+
+      const totalPts = arrowSrc.length;
+      const arrowCount = Math.min(12, Math.max(3, Math.floor(totalPts / 20)));
+      const step = Math.floor(totalPts / arrowCount);
+
+      for (let i = step; i < arrowSrc.length - 1; i += step) {
+        const a = arrowSrc[i];
+        const b = arrowSrc[Math.min(i + 3, arrowSrc.length - 1)];
         const bearing = calculateBearing(a.lat, a.lng, b.lat, b.lng);
-        L.marker([(a.lat + b.lat) / 2, (a.lng + b.lng) / 2], {
+        L.marker([a.lat, a.lng], {
           icon: L.divIcon({
             className: "",
-            html: `<svg width="20" height="20" viewBox="0 0 20 20" style="transform:rotate(${bearing}deg);display:block" xmlns="http://www.w3.org/2000/svg"><polygon points="10,2 17,16 10,12 3,16" fill="${lineColor}" fill-opacity="0.9" stroke="#0e0e0e" stroke-width="1.5" stroke-linejoin="round"/></svg>`,
-            iconSize: [20, 20],
-            iconAnchor: [10, 10],
+            html: `<svg width="14" height="14" viewBox="0 0 14 14" style="transform:rotate(${bearing}deg);display:block;filter:drop-shadow(0 0 1px #0e0e0e)" xmlns="http://www.w3.org/2000/svg">
+              <polygon points="7,1 13,13 7,9 1,13" fill="${lineColor}" stroke="#0e0e0e" stroke-width="1.5" stroke-linejoin="round"/>
+            </svg>`,
+            iconSize: [14, 14],
+            iconAnchor: [7, 7],
           }),
           interactive: false,
-          zIndexOffset: -100,
+          zIndexOffset: 50,
         }).addTo(shapeLayerGroup);
       }
     }
@@ -767,16 +724,12 @@
         return;
       }
 
-      // FIXED: when a stop panel is open, show all buses that pass the
-      // favourites/search filter — don't hide non-incoming ones
       const passesFilter = shouldShow(bus.normalizedRoute);
       const visible = showBuses && passesFilter;
       const inViewport = map.getBounds().pad(0.3).contains([bus.lat, bus.lng]);
       const isIncoming = incomingTripIds.has(resolveStaticTripId(bus.tripId));
       const isSelected =
         hasRoute && bus.normalizedRoute === normalize(selectedRoute);
-
-      // Only dim when a specific trip has been tapped from the stop panel
       const dimmed =
         hasStop && selectedTripId ? bus.tripId !== selectedTripId : false;
 
@@ -800,7 +753,6 @@
       );
     });
 
-    // CHANGED: zoom to fit all buses of the searched route
     if (shouldAutoFit && visibleMarkers.length) {
       map.fitBounds(L.featureGroup(visibleMarkers).getBounds().pad(0.15), {
         maxZoom: 14,
@@ -863,7 +815,6 @@
       }
 
       followingBus = false;
-      clearSelectedStop();
       selectedRoute = normalizedRoute;
       selectedTripId = bus.tripId;
 
@@ -907,12 +858,9 @@
       for (const newBus of newBuses) {
         const nr = normalize(newBus.routeName);
         const bearing = resolveBearing(newBus);
-        const distFromRoute = distanceFromShape(
-          newBus.tripId,
-          newBus.lat,
-          newBus.lng
-        );
-        if (distFromRoute > 0.001) {
+        const dist = distanceFromShape(newBus.tripId, newBus.lat, newBus.lng);
+
+        if (dist !== null && dist > 0.01) {
           if (busData.has(newBus.id)) {
             clusterGroup.removeLayer(busData.get(newBus.id).marker);
             busData.delete(newBus.id);
@@ -956,7 +904,7 @@
 
       if (selectedStop) {
         incomingTripIds = getIncomingTripsForStop(selectedStop.stop_id);
-        await refreshStopArrivals(selectedStop);
+        if (!selectedTripId) await refreshStopArrivals(selectedStop);
       }
       if (followingBus && selectedTripId) {
         const followed = [...busData.values()].find(
@@ -978,8 +926,6 @@
     }
   }
 
-  // FIXED: eagerly fetch all live bus schedules before computing arrivals
-  // so we don't miss buses whose trip schedules haven't loaded yet
   async function refreshStopArrivals(stop) {
     const unfetched = [
       ...new Set(
@@ -1018,7 +964,6 @@
       });
       if (!liveBus) return;
       const i = nearestStopIdx(stops, liveBus.lat, liveBus.lng);
-      // FIXED: <= so bus sitting at the stop is included
       if (i > targetIdx) return;
       trips.push({
         tripId: liveBus.tripId,
@@ -1036,7 +981,6 @@
       return;
     }
 
-    // Fallback to scheduled
     try {
       const times = await fetch(`${API}/stop-times/${stop.stop_id}`).then((r) =>
         r.json()
@@ -1060,7 +1004,7 @@
   }
 
   async function openStopPanel(stop) {
-    if (stopPanelStop?.stop_id === stop.stop_id) {
+    if (stopPanelStop?.stop_id === stop.stop_id && !selectedTripId) {
       clearSelectedStop();
       applySearch();
       return;
@@ -1071,6 +1015,7 @@
     stopPanelLoading = true;
     selectedTripId = "";
     selectedRoute = "";
+    originStopId = null;
     clearBusPanel();
 
     const lat = +stop.stop_lat,
@@ -1085,7 +1030,6 @@
     applySearch();
 
     try {
-      // Eagerly fetch all live bus schedules so arrivals are complete
       const unfetched = [
         ...new Set(
           [...busData.values()]
@@ -1127,6 +1071,8 @@
     selectedRoute = entry.normalizedRoute;
     selectedTripId = arrival.tripId;
     followingBus = false;
+    // Remember which stop we clicked from so we can highlight it in bus panel
+    originStopId = stopPanelStop?.stop_id ?? null;
     loadBusStopPanel(arrival.tripId);
 
     const stopLat = +stopPanelStop.stop_lat;
@@ -1148,6 +1094,20 @@
       }
     );
     applySearch();
+  }
+
+  // Click a stop row in the bus stop times panel — open its arrivals
+  function handleBusPanelStopClick(busPanelStop) {
+    const stop = allStops.find((s) => s.stop_id === busPanelStop.stop_id);
+    if (!stop) return;
+    selectedTripId = "";
+    selectedRoute = "";
+    followingBus = false;
+    originStopId = null;
+    clearBusPanel();
+    shapeLayerGroup?.clearLayers();
+    stopLayerGroup?.clearLayers();
+    jumpToStop(stop);
   }
 
   export function zoomToBus(tripId) {
@@ -1189,6 +1149,50 @@
     }, backoffDelay);
   }
 
+  async function fetchRouteStops(routeNames) {
+    try {
+      const tripsArr = indexTrips(
+        await fetch(`${API}/trips`).then((r) => r.json()),
+        routeNames
+      );
+      const tripToRoute = new Map();
+      for (const trip of tripsArr) {
+        const name = routeNames[trip.route_id?.trim()];
+        if (name) tripToRoute.set(trip.trip_id, normalize(name));
+      }
+      routeStopIds = new Map();
+      const liveTripIds = buses.map((b) => b.tripId).filter(Boolean);
+      const active = [
+        ...new Set(liveTripIds.length ? liveTripIds : [...tripToRoute.keys()]),
+      ];
+      for (let i = 0; i < active.length; i += 10) {
+        await Promise.all(
+          active.slice(i, i + 10).map(async (tripId) => {
+            const sid = resolveStaticTripId(tripId);
+            if (tripStopSequence.has(sid)) return;
+            const stops = await fetchTripSchedule(sid).catch(() => null);
+            if (!stops?.length) return;
+            const nr = tripToRoute.get(tripId) || tripToRoute.get(sid);
+            if (nr) {
+              if (!routeStopIds.has(nr)) routeStopIds.set(nr, new Set());
+              for (const s of stops) routeStopIds.get(nr).add(s.stop_id);
+            }
+            const ordered = stops
+              .map((s) => ({
+                stop_id: s.stop_id,
+                seq: +s.stop_sequence,
+                arrival_time: s.arrival_time || s.departure_time || null,
+              }))
+              .sort((a, b) => a.seq - b.seq);
+            tripStopSequence.set(sid, ordered);
+          })
+        );
+      }
+    } catch {
+      console.warn("Could not load route stops");
+    }
+  }
+
   onMount(async () => {
     map = L.map(mapContainer, {
       zoomControl: false,
@@ -1223,7 +1227,7 @@
       }));
     }, 1000);
     setInterval(async () => {
-      if (stopPanelStop && !stopPanelLoading) {
+      if (stopPanelStop && !stopPanelLoading && !selectedTripId) {
         incomingTripIds = getIncomingTripsForStop(stopPanelStop.stop_id);
         await refreshStopArrivals(stopPanelStop);
         applySearch();
@@ -1246,12 +1250,12 @@
     map.addLayer(clusterGroup);
     map.on("moveend zoomend", () => applySearch());
     map.on("click", () => {
-      // Dispatch clearSearch so App.svelte resets the SearchBox value
       dispatch("clearSearch");
       if (stopPanelStop && selectedTripId) {
         selectedRoute = "";
         selectedTripId = "";
         followingBus = false;
+        originStopId = null;
         clearBusPanel();
         shapeLayerGroup?.clearLayers();
         stopLayerGroup?.clearLayers();
@@ -1271,6 +1275,7 @@
         selectedRoute = "";
         selectedTripId = "";
         followingBus = false;
+        originStopId = null;
         clearBusPanel();
         clearSelectedStop();
         shapeLayerGroup?.clearLayers();
@@ -1302,7 +1307,6 @@
     fetchStops().then(() =>
       fetchRouteStops(routeNames).then(() => {
         matchTripsToShapes();
-        refilterBusesAfterShapeMatch();
         refreshAllBearings();
         applySearch();
       })
@@ -1333,7 +1337,6 @@
     }
   });
 
-  // CHANGED: trigger auto-fit zoom when searchTerm changes to a valid route
   let prevSearchTerm = "";
   let searchDebounce;
   $: {
@@ -1367,18 +1370,38 @@
   </div>
 {/if}
 
-<!-- Update pill — moved to TOP, below search bar -->
 {#if timeSinceUpdate}
   <div class="update-pill">{timeSinceUpdate}</div>
 {/if}
 
-<!-- Stop arrivals panel — floats above footer -->
-{#if stopPanelStop}
+<!-- Stop arrivals panel — dark style, hidden when bus trip is selected -->
+{#if stopPanelStop && !selectedTripId}
   <div class="board-panel">
     <div class="board-panel-header">
-      <div class="board-panel-header-left">
-        <div class="board-stop-code">STOP {stopPanelStop.stop_code}</div>
-        <div class="board-stop-name">{stopPanelStop.stop_name}</div>
+      <div class="board-header-stop-info">
+        <div class="board-header-logo">
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+          >
+            <rect x="1" y="3" width="15" height="13" rx="2" /><path
+              d="M16 8h4l3 5v3h-7V8z"
+            />
+            <circle cx="5.5" cy="18.5" r="2.5" /><circle
+              cx="18.5"
+              cy="18.5"
+              r="2.5"
+            />
+          </svg>
+        </div>
+        <div>
+          <div class="board-stop-number">Stop {stopPanelStop.stop_code}</div>
+          <div class="board-stop-name">{stopPanelStop.stop_name}</div>
+        </div>
       </div>
       <div class="board-panel-actions">
         <button
@@ -1409,16 +1432,24 @@
         >
       </div>
     </div>
+
+    <div class="board-col-headers">
+      <span class="bch-route">Route</span>
+      <span class="bch-dest">Tracking</span>
+      <span class="bch-time">Due</span>
+    </div>
+
     <div class="board-rows">
       {#if stopPanelLoading}
         <div class="board-empty">Loading arrivals…</div>
       {:else if !stopPanelArrivals.length}
         <div class="board-empty">No upcoming arrivals</div>
       {:else}
-        {#each stopPanelArrivals as arrival}
+        {#each stopPanelArrivals as arrival, i}
           <button
             class="board-row"
             class:board-row-live={arrival.type === "live" && arrival.tripId}
+            class:board-row-alt={i % 2 === 1}
             on:click={() => handleArrivalClick(arrival)}
           >
             <span class="board-num">{arrival.routeName}</span>
@@ -1440,13 +1471,13 @@
             </span>
             {#if arrival.type === "live" && arrival.tripId}
               <svg
-                width="12"
-                height="12"
+                width="10"
+                height="10"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="#e8a020"
-                stroke-width="2.5"
-                style="flex-shrink:0"
+                stroke-width="3"
+                style="flex-shrink:0;margin-left:2px"
               >
                 <polyline points="9 18 15 12 9 6" />
               </svg>
@@ -1458,18 +1489,22 @@
   </div>
 {/if}
 
-<!-- Bus stop times panel — stacks above stop panel when both open -->
+<!-- Bus stop times panel — white/blue style -->
 {#if selectedTripId && busPanelStops.length > 0}
-  <div
-    class="board-panel bus-stop-panel"
-    class:with-stop-panel={!!stopPanelStop}
-  >
-    <div class="board-panel-header">
-      <div class="board-panel-header-left">
-        <div class="board-stop-code">ROUTE</div>
-        <div class="board-stop-name">
+  <div class="board-panel bus-stop-panel">
+    <div class="board-panel-header bus-panel-header">
+      <div class="board-header-stop-info">
+        <div class="board-route-badge">
           {[...busData.values()].find((b) => b.tripId === selectedTripId)
             ?.routeName ?? ""}
+        </div>
+        <div>
+          <div class="board-stop-number" style="color:#cce0ff">Route stops</div>
+          <div class="board-stop-name" style="color:#fff">
+            {getTripDirection(selectedTripId) === "northbound"
+              ? "↑ Northbound"
+              : "↓ Southbound"}
+          </div>
         </div>
       </div>
       <button
@@ -1478,6 +1513,7 @@
           selectedRoute = "";
           selectedTripId = "";
           followingBus = false;
+          originStopId = null;
           clearBusPanel();
           shapeLayerGroup?.clearLayers();
           stopLayerGroup?.clearLayers();
@@ -1485,15 +1521,19 @@
         }}>✕</button
       >
     </div>
+
     <div class="board-rows bus-stop-list">
       {#if busPanelLoading}
-        <div class="board-empty">Loading stops…</div>
+        <div class="board-empty" style="color:#888">Loading stops…</div>
       {:else}
-        {#each busPanelStops as stop}
-          <div
+        {#each busPanelStops as stop, i}
+          <button
             class="bus-stop-row"
             class:bus-stop-passed={stop.isPassed}
             class:bus-stop-current={stop.isCurrent}
+            class:bus-stop-origin={stop.isOrigin && !stop.isCurrent}
+            class:bus-stop-alt={i % 2 === 1}
+            on:click={() => handleBusPanelStopClick(stop)}
           >
             <div class="bs-spine">
               <div
@@ -1504,6 +1544,7 @@
                 class="bs-dot"
                 class:bs-dot-current={stop.isCurrent}
                 class:bs-dot-passed={stop.isPassed}
+                class:bs-dot-origin={stop.isOrigin && !stop.isCurrent}
               ></div>
               <div
                 class="bs-line bs-line-bot"
@@ -1514,34 +1555,75 @@
               <span class="bs-name" class:bs-name-passed={stop.isPassed}
                 >{stop.stop_name}</span
               >
-              {#if stop.stop_code}<span class="bs-code">{stop.stop_code}</span
+              {#if stop.stop_code}<span class="bs-code">#{stop.stop_code}</span
                 >{/if}
+              {#if stop.isOrigin && !stop.isCurrent}
+                <span class="bs-origin-label">your stop</span>
+              {/if}
             </div>
-            <div
-              class="bs-time"
-              class:bs-ontime={stop.status === "ontime"}
-              class:bs-early={stop.status === "early"}
-              class:bs-late={stop.status === "late"}
-              class:bs-future={stop.status === "future"}
-              class:bs-future-early={stop.status === "future-early"}
-              class:bs-future-late={stop.status === "future-late"}
-            >
-              {stop.displayTime}
+            <div class="bs-time-wrap">
+              <span
+                class="bs-time"
+                class:bs-time-passed={stop.isPassed && !stop.isCurrent}
+                class:bs-time-current={stop.isCurrent}
+                class:bs-ontime={stop.status === "ontime"}
+                class:bs-early={stop.status === "early" ||
+                  stop.status === "future-early"}
+                class:bs-late={stop.status === "late" ||
+                  stop.status === "future-late"}>{stop.displayTime}</span
+              >
               {#if stop.status === "early" || stop.status === "future-early"}
                 <span class="bs-badge bs-badge-early">early</span>
               {:else if stop.status === "late" || stop.status === "future-late"}
                 <span class="bs-badge bs-badge-late">late</span>
               {/if}
             </div>
-          </div>
+          </button>
         {/each}
       {/if}
     </div>
   </div>
 {/if}
 
-<!-- Map controls — all on LEFT side -->
+<!-- Zoom controls — LEFT, styled blue/yellow like stop times panel -->
 <div class="map-controls-left">
+  <button class="map-btn-zoom" on:click={() => map.zoomIn()} title="Zoom in">
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.5"
+    >
+      <line x1="12" y1="5" x2="12" y2="19" /><line
+        x1="5"
+        y1="12"
+        x2="19"
+        y2="12"
+      />
+    </svg>
+  </button>
+  <button
+    class="map-btn-zoom map-btn-zoom-minus"
+    on:click={() => map.zoomOut()}
+    title="Zoom out"
+  >
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.5"
+    >
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  </button>
+</div>
+
+<!-- Location + Refresh — RIGHT, dark style -->
+<div class="map-controls-right">
   <button class="map-btn" on:click={locateMe} title="My location">
     <svg
       width="18"
@@ -1581,35 +1663,6 @@
       />
     </svg>
   </button>
-  <button class="map-btn" on:click={() => map.zoomIn()} title="Zoom in">
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-    >
-      <line x1="12" y1="5" x2="12" y2="19" /><line
-        x1="5"
-        y1="12"
-        x2="19"
-        y2="12"
-      />
-    </svg>
-  </button>
-  <button class="map-btn" on:click={() => map.zoomOut()} title="Zoom out">
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-    >
-      <line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  </button>
 </div>
 
 <style>
@@ -1626,57 +1679,76 @@
     height: 100%;
   }
 
-  /* ── Shared panel base ── */
+  /* ═══════════════════════════════════════════
+     STOP ARRIVALS PANEL — dark style
+  ═══════════════════════════════════════════ */
   .board-panel {
     position: fixed;
-    bottom: 100px; /* always above the 100px footer */
+    bottom: 100px;
     left: 0;
     right: 0;
     z-index: 1100;
-    background: #0e0e0e;
-    border-top: 1px solid #2a2a2a;
-    border-radius: 14px 14px 0 0;
+    background: #111111;
+    border-top: 3px solid #e8a020;
+    border-radius: 12px 12px 0 0;
     box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.7);
-    max-height: 260px;
+    max-height: 280px;
     display: flex;
     flex-direction: column;
     font-family: "Courier New", Courier, monospace;
-  }
-
-  /* Bus stop panel: default above footer, shifts up when stop panel also open */
-  .bus-stop-panel {
-    bottom: 100px;
-  }
-  .bus-stop-panel.with-stop-panel {
-    bottom: 200px; /* 100px footer + 260px stop panel + 10px gap */
+    overflow: hidden;
   }
 
   .board-panel-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 16px 10px;
-    border-bottom: 1px solid #1e1e1e;
+    padding: 10px 14px;
+    background: #1a1a1a;
+    border-bottom: 1px solid #2a2a2a;
     flex-shrink: 0;
   }
-  .board-panel-header-left {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+  /* Blue header for bus stop panel */
+  .bus-panel-header {
+    background: #1a6bbf;
+    border-bottom: none;
   }
-  .board-stop-code {
+
+  .board-header-stop-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #e8a020;
+  }
+  .board-header-logo {
+    color: #e8a020;
+    flex-shrink: 0;
+  }
+  .board-stop-number {
     font-size: 10px;
-    color: #555;
+    font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+    color: #888;
     font-family: "Courier New", Courier, monospace;
   }
   .board-stop-name {
     font-size: 15px;
     font-weight: 700;
     color: #e8a020;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.03em;
     font-family: "Courier New", Courier, monospace;
+  }
+  .board-route-badge {
+    background: #e8c84a;
+    color: #0e0e0e;
+    font-size: 20px;
+    font-weight: 900;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-family: "Courier New", Courier, monospace;
+    letter-spacing: 0.02em;
+    flex-shrink: 0;
   }
   .board-panel-actions {
     display: flex;
@@ -1684,54 +1756,74 @@
     gap: 4px;
   }
   .board-icon-btn {
-    background: none;
+    background: rgba(255, 255, 255, 0.07);
     border: none;
-    color: #555;
+    color: #888;
     cursor: pointer;
-    padding: 6px;
+    padding: 5px;
     display: flex;
     align-items: center;
-    border-radius: 6px;
+    border-radius: 5px;
     transition:
-      color 0.15s,
-      background 0.15s;
-    font-family: "Courier New", Courier, monospace;
+      background 0.15s,
+      color 0.15s;
   }
   .board-icon-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
     color: #e8a020;
-    background: #1a1a1a;
   }
   .board-icon-btn.saved {
     color: #e8a020;
   }
   .board-close-btn {
-    font-size: 15px;
-    color: #444;
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.7);
   }
-  .board-close-btn:hover {
-    color: #e8a020;
+
+  .board-col-headers {
+    display: flex;
+    align-items: center;
+    padding: 4px 14px;
+    background: #e8a020;
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #1a1a00;
+    font-family: "Courier New", Courier, monospace;
+  }
+  .bch-route {
+    min-width: 52px;
+  }
+  .bch-dest {
+    flex: 1;
+  }
+  .bch-time {
+    min-width: 52px;
+    text-align: right;
   }
 
   .board-rows {
     overflow-y: auto;
     flex: 1;
-    padding: 2px 0 8px;
+    background: #111111;
   }
   .board-empty {
     font-size: 12px;
-    color: #444;
+    color: #555;
     padding: 14px 16px;
     font-family: "Courier New", Courier, monospace;
-    letter-spacing: 0.05em;
   }
+
+  /* Dark arrival rows */
   .board-row {
     display: flex;
     align-items: center;
-    gap: 0;
-    padding: 9px 16px;
-    border-bottom: 1px solid #161616;
+    padding: 10px 14px;
+    border-bottom: 1px solid #1e1e1e;
     width: 100%;
-    background: none;
+    background: #111111;
     border-left: none;
     border-right: none;
     border-top: none;
@@ -1739,15 +1831,22 @@
     cursor: default;
     transition: background 0.1s;
   }
+  .board-row-alt {
+    background: #161616;
+  }
   .board-row-live {
     cursor: pointer;
   }
-  .board-row-live:active {
-    background: #1a1a1a;
+  .board-row-live:hover {
+    background: #1c1800;
   }
+  .board-row-live:active {
+    background: #252000;
+  }
+
   .board-num {
     font-size: 18px;
-    font-weight: 700;
+    font-weight: 900;
     color: #e8a020;
     min-width: 52px;
     letter-spacing: 0.02em;
@@ -1755,9 +1854,9 @@
   }
   .board-dest {
     flex: 1;
-    font-size: 13px;
-    color: #a06a10;
-    letter-spacing: 0.04em;
+    font-size: 12px;
+    color: #666;
+    letter-spacing: 0.03em;
     font-family: "Courier New", Courier, monospace;
     white-space: nowrap;
     overflow: hidden;
@@ -1767,14 +1866,14 @@
     font-size: 15px;
     font-weight: 700;
     color: #e8a020;
-    min-width: 52px;
+    min-width: 46px;
     text-align: right;
     letter-spacing: 0.02em;
     font-family: "Courier New", Courier, monospace;
-    margin-right: 4px;
+    margin-right: 2px;
   }
   .board-due {
-    color: #ff6b35;
+    color: #cc2200;
     animation: blink 1s step-end infinite;
   }
   @keyframes blink {
@@ -1783,23 +1882,61 @@
       opacity: 1;
     }
     50% {
-      opacity: 0.25;
+      opacity: 0.2;
     }
   }
 
-  /* ── Bus stop list ── */
+  /* ═══════════════════════════════════════════
+     BUS STOP TIMES PANEL — white/blue style
+  ═══════════════════════════════════════════ */
+  .bus-stop-panel {
+    bottom: 100px;
+    background: #fff;
+    border-top: 4px solid #1a6bbf;
+  }
   .bus-stop-list {
     padding: 0;
+    background: #fff;
   }
+
   .bus-stop-row {
     display: flex;
     align-items: stretch;
-    gap: 10px;
-    padding: 0 16px;
-    min-height: 40px;
+    gap: 8px;
+    padding: 0 14px;
+    min-height: 38px;
+    background: #ffffff;
+    border-bottom: 1px solid #e8e8e8;
+    width: 100%;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    text-align: left;
+    cursor: pointer;
+    transition: filter 0.1s;
   }
+  .bus-stop-row:hover {
+    filter: brightness(0.94);
+  }
+  .bus-stop-row:active {
+    filter: brightness(0.88);
+  }
+
+  .bus-stop-alt {
+    background: #f4f8ff;
+  }
+  /* Current bus position — yellow */
   .bus-stop-current {
-    background: #111008;
+    background: #e8c84a !important;
+    border-left: 3px solid #1a6bbf;
+  }
+  /* Origin stop — where the user clicked from — light orange tint */
+  .bus-stop-origin {
+    background: #fff6e8 !important;
+    border-left: 3px solid #e8a020;
+  }
+  .bus-stop-passed {
+    opacity: 0.45;
   }
 
   .bs-spine {
@@ -1812,32 +1949,41 @@
   .bs-line {
     width: 2px;
     flex: 1;
-    background: #1e1e1e;
+    background: #ddd;
     min-height: 6px;
   }
   .bs-line-filled {
-    background: #3a2e00;
+    background: #aac4e8;
   }
   .bs-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #222;
-    border: 2px solid #333;
+    background: #ccc;
+    border: 2px solid #aaa;
     flex-shrink: 0;
     z-index: 1;
     transition: all 0.2s;
   }
   .bs-dot-passed {
-    background: #3a2e00;
-    border-color: #6a5000;
+    background: #aac4e8;
+    border-color: #6699cc;
   }
   .bs-dot-current {
     width: 12px;
     height: 12px;
-    background: #e8a020;
+    background: #1a6bbf;
+    border-color: #1a6bbf;
+    box-shadow: 0 0 6px rgba(26, 107, 191, 0.5);
+  }
+  /* Origin dot — orange ring, white centre */
+  .bs-dot-origin {
+    width: 10px;
+    height: 10px;
+    background: #fff;
     border-color: #e8a020;
-    box-shadow: 0 0 6px rgba(232, 160, 32, 0.6);
+    border-width: 2.5px;
+    box-shadow: 0 0 5px rgba(232, 160, 32, 0.4);
   }
 
   .bs-info {
@@ -1850,80 +1996,104 @@
   }
   .bs-name {
     font-size: 12px;
-    color: #e8a020;
+    font-weight: 600;
+    color: #1a1a1a;
     font-family: "Courier New", Courier, monospace;
-    letter-spacing: 0.02em;
+    letter-spacing: 0.01em;
   }
   .bs-name-passed {
-    color: #4a3800;
-  }
-  .bs-code {
-    font-size: 10px;
-    color: #3a3000;
-    font-family: "Courier New", Courier, monospace;
-    letter-spacing: 0.05em;
+    color: #888;
   }
   .bus-stop-current .bs-name {
-    color: #e8a020;
+    color: #1a1a00;
+    font-weight: 700;
   }
-  .bus-stop-current .bs-code {
-    color: #6a5010;
+  .bus-stop-origin .bs-name {
+    color: #7a4400;
+    font-weight: 700;
   }
 
+  .bs-code {
+    font-size: 10px;
+    color: #999;
+    font-family: "Courier New", Courier, monospace;
+  }
+  .bus-stop-current .bs-code {
+    color: #555;
+  }
+
+  /* "your stop" pill */
+  .bs-origin-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #e8a020;
+    font-family: "Courier New", Courier, monospace;
+  }
+
+  .bs-time-wrap {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 52px;
+    justify-content: flex-end;
+    padding: 4px 0;
+  }
   .bs-time {
     font-size: 12px;
     font-weight: 700;
     font-family: "Courier New", Courier, monospace;
-    min-width: 48px;
-    text-align: right;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 4px;
-    padding: 4px 0;
+    color: #333;
     letter-spacing: 0.03em;
   }
-  .bs-ontime {
-    color: #1a1a1a;
+  .bs-time-passed {
+    color: #aaa;
   }
-  .bs-early {
-    color: #2a7a2a;
-  }
-  .bs-late {
-    color: #8a2a2a;
-  }
-  .bs-future {
-    color: #6a5010;
-  }
-  .bs-future-early {
-    color: #2a6a2a;
-  }
-  .bs-future-late {
-    color: #7a2a2a;
+  .bs-time-current {
+    color: #1a6bbf;
+    font-size: 13px;
   }
   .bus-stop-current .bs-time {
-    color: #e8a020;
+    color: #1a1a00 !important;
+  }
+  .bus-stop-origin .bs-time {
+    color: #7a4400;
+  }
+  .bs-ontime {
+    color: #2a7a2a;
+  }
+  .bs-early {
+    color: #1a6bbf;
+  }
+  .bs-late {
+    color: #cc2200;
   }
 
   .bs-badge {
-    font-size: 9px;
+    font-size: 8px;
     padding: 1px 3px;
     border-radius: 3px;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+    font-weight: 700;
   }
   .bs-badge-early {
-    background: #0a2a0a;
-    color: #2a8a2a;
-    border: 1px solid #1a4a1a;
+    background: #ddeeff;
+    color: #1a6bbf;
+    border: 1px solid #aaccee;
   }
   .bs-badge-late {
-    background: #2a0a0a;
-    color: #aa3a3a;
-    border: 1px solid #4a1a1a;
+    background: #ffeeee;
+    color: #cc2200;
+    border: 1px solid #ffaaaa;
   }
 
-  /* ── Map controls on LEFT ── */
+  /* ═══════════════════════════════════════════
+     MAP CONTROLS
+  ═══════════════════════════════════════════ */
+
+  /* Zoom — LEFT, blue/yellow like the stop times header */
   .map-controls-left {
     position: fixed;
     left: 12px;
@@ -1931,7 +2101,52 @@
     z-index: 1000;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+    border: 2px solid #1a6bbf;
+  }
+  .map-btn-zoom {
+    width: 44px;
+    height: 44px;
+    background: #1a6bbf;
+    border: none;
+    border-radius: 0;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition: background 0.15s;
+  }
+  .map-btn-zoom:hover {
+    background: #1558a0;
+  }
+  .map-btn-zoom:active {
+    background: #0e3e7a;
+  }
+  .map-btn-zoom-minus {
+    background: #e8c84a;
+    color: #1a1a00;
+    border-top: 2px solid #1a6bbf;
+  }
+  .map-btn-zoom-minus:hover {
+    background: #f0d060;
+  }
+  .map-btn-zoom-minus:active {
+    background: #d4b030;
+  }
+
+  /* Location + Refresh — RIGHT, dark style */
+  .map-controls-right {
+    position: fixed;
+    right: 12px;
+    top: 12px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
   .map-btn {
     width: 44px;
@@ -1944,11 +2159,11 @@
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    padding: 0;
     transition:
       background 0.15s,
       border-color 0.15s;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-    padding: 0;
   }
   .map-btn:hover {
     background: #1a1a1a;
@@ -1958,7 +2173,9 @@
     background: #2a2000;
   }
 
-  /* ── Bus marker ── */
+  /* ═══════════════════════════════════════════
+     BUS / CLUSTER / STOP MARKERS
+  ═══════════════════════════════════════════ */
   :global(.bus-marker-outer) {
     position: relative;
     width: 20px;
@@ -1991,8 +2208,6 @@
     text-align: center;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
   }
-
-  /* ── Cluster ── */
   :global(.cluster-icon) {
     width: 34px;
     height: 34px;
@@ -2007,10 +2222,7 @@
     border: 2px solid #e8a020;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
     font-family: "Courier New", Courier, monospace;
-    letter-spacing: 0.02em;
   }
-
-  /* ── Stop markers ── */
   :global(.stop-marker) {
     width: 10px;
     height: 10px;
@@ -2023,13 +2235,15 @@
   :global(.stop-marker-highlighted) {
     width: 16px;
     height: 16px;
-    background: #2a8a2a;
-    border: 2px solid #0e0e0e;
+    background: #e8c84a;
+    border: 2px solid #1a6bbf;
     border-radius: 50%;
-    box-shadow: 0 0 8px rgba(232, 160, 32, 0.7);
+    box-shadow: 0 0 8px rgba(232, 200, 74, 0.8);
   }
 
-  /* ── Update pill — TOP below search ── */
+  /* ═══════════════════════════════════════════
+     UPDATE PILL
+  ═══════════════════════════════════════════ */
   .update-pill {
     position: fixed;
     top: 66px;
@@ -2048,7 +2262,9 @@
     white-space: nowrap;
   }
 
-  /* ── Loading ── */
+  /* ═══════════════════════════════════════════
+     LOADING
+  ═══════════════════════════════════════════ */
   .loading {
     position: fixed;
     inset: 0;
@@ -2081,7 +2297,9 @@
     }
   }
 
-  /* ── Leaflet overrides ── */
+  /* ═══════════════════════════════════════════
+     LEAFLET OVERRIDES
+  ═══════════════════════════════════════════ */
   :global(.leaflet-control-zoom) {
     display: none;
   }
